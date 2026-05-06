@@ -19,11 +19,15 @@ from config import (
     LONG_STABILITY_THRESHOLD,
     LONG_STABILITY_WINDOW,
     LONG_SIGNAL_THRESHOLD,
+    LONG_REGIME_FULL_HIGH_MIN_BODY_RATIO,
+    LONG_REGIME_FULL_HIGH_MIN_CLOSE_POSITION,
+    LONG_REGIME_MAX_RSI_14,
     LONG_REGIME_REQUIRE_EMA_20_60_POSITIVE,
     LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE,
     LONG_REGIME_MAX_RET_5,
     LONG_REGIME_MIN_CLOSE_POSITION,
     LONG_REGIME_MIN_RET_30,
+    LONG_REGIME_SKIP_FULL_HIGH_BODY,
     MODEL_FILE,
     RANDOM_STATE,
     SHORT_STABILITY_MIN_COUNT,
@@ -229,6 +233,20 @@ class SingleDirectionModel:
         if LONG_REGIME_MIN_RET_30 is not None:
             ret_30 = self._feature_value(row, "ret_30")
             if ret_30 <= LONG_REGIME_MIN_RET_30:
+                return False
+
+        if LONG_REGIME_MAX_RSI_14 is not None:
+            rsi_14 = self._feature_value(row, "rsi_14")
+            if rsi_14 >= LONG_REGIME_MAX_RSI_14:
+                return False
+
+        if LONG_REGIME_SKIP_FULL_HIGH_BODY:
+            body_ratio = self._feature_value(row, "body_ratio")
+            close_position = self._feature_value(row, "close_position")
+            if (
+                body_ratio > LONG_REGIME_FULL_HIGH_MIN_BODY_RATIO
+                and close_position > LONG_REGIME_FULL_HIGH_MIN_CLOSE_POSITION
+            ):
                 return False
 
         return True
