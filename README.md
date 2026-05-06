@@ -27,7 +27,7 @@ ShortTermTrendPredictor/
 - 预测标的：BTC/USDT 1m K 线。
 - 预测目标：未来 10 分钟 close 是否高于当前 close。
 - 高置信基础阈值：`up_probability >= 0.80` 或 `up_probability <= 0.20`。
-- 连续确认过滤：做空要求最近 15 分钟内至少 10 次 `up_probability <= 0.20`，且 `close_position > 0.70`、`macd_hist < 0`，两次有效信号至少间隔 5 分钟。
+- 连续确认过滤：做空要求最近 15 分钟内至少 10 次 `up_probability <= 0.25`，且当前 `up_probability <= 0.20`、`close_position > 0.70`、`macd_hist < 0`、`0 < ret_30 < 0.0015`、`ret_10 > -0.0005`；若 `taker_buy_ratio >= 0.95`、`body_ratio >= 0.95` 且 `trend_agreement > 0` 则跳过，两次有效信号至少间隔 1 分钟。
 - 当前实盘信号配置：只启用做空连续确认信号；做多侧在完整长窗口早段不稳定，暂时禁用。
 - 训练标签灰区：训练时忽略未来 10 分钟涨跌幅绝对值小于 `0.03%` 的噪声样本。
 - 评估口径：只统计高置信信号胜率，忽略全局准确率。

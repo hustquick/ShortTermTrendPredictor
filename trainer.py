@@ -29,7 +29,16 @@ from config import (
     SHORT_STABILITY_THRESHOLD,
     SHORT_STABILITY_WINDOW,
     SHORT_REGIME_MIN_CLOSE_POSITION,
+    SHORT_REGIME_AGGRESSIVE_BUY_MIN_BODY_RATIO,
+    SHORT_REGIME_AGGRESSIVE_BUY_MIN_TAKER_RATIO,
+    SHORT_REGIME_AGGRESSIVE_BUY_MIN_TREND,
+    SHORT_REGIME_MAX_RET_30,
+    SHORT_REGIME_MIN_RET_10,
+    SHORT_REGIME_MIN_RET_30,
     SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE,
+    SHORT_REGIME_SKIP_AGGRESSIVE_BUY_CANDLE,
+    SHORT_REGIME_SKIP_WEAK_MIXED_BULLISH_TREND,
+    SHORT_REGIME_WEAK_TREND_MAX_RSI_6,
     SIGNAL_MIN_INTERVAL_MINUTES,
     SHORT_SIGNAL_THRESHOLD,
     SIGNAL_MIN_TREND_AGREEMENT,
@@ -234,6 +243,38 @@ class SingleDirectionModel:
         if SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE:
             macd_hist = self._feature_value(row, "macd_hist")
             if macd_hist >= 0:
+                return False
+
+        if SHORT_REGIME_MIN_RET_30 is not None:
+            ret_30 = self._feature_value(row, "ret_30")
+            if ret_30 <= SHORT_REGIME_MIN_RET_30:
+                return False
+
+        if SHORT_REGIME_MAX_RET_30 is not None:
+            ret_30 = self._feature_value(row, "ret_30")
+            if ret_30 >= SHORT_REGIME_MAX_RET_30:
+                return False
+
+        if SHORT_REGIME_MIN_RET_10 is not None:
+            ret_10 = self._feature_value(row, "ret_10")
+            if ret_10 <= SHORT_REGIME_MIN_RET_10:
+                return False
+
+        if SHORT_REGIME_SKIP_AGGRESSIVE_BUY_CANDLE:
+            taker_buy_ratio = self._feature_value(row, "taker_buy_ratio")
+            body_ratio = self._feature_value(row, "body_ratio")
+            trend_agreement = self._feature_value(row, "trend_agreement")
+            if (
+                taker_buy_ratio >= SHORT_REGIME_AGGRESSIVE_BUY_MIN_TAKER_RATIO
+                and body_ratio >= SHORT_REGIME_AGGRESSIVE_BUY_MIN_BODY_RATIO
+                and trend_agreement > SHORT_REGIME_AGGRESSIVE_BUY_MIN_TREND
+            ):
+                return False
+
+        if SHORT_REGIME_SKIP_WEAK_MIXED_BULLISH_TREND:
+            trend_agreement = self._feature_value(row, "trend_agreement")
+            rsi_6 = self._feature_value(row, "rsi_6")
+            if 0 < trend_agreement < 1 and rsi_6 < SHORT_REGIME_WEAK_TREND_MAX_RSI_6:
                 return False
 
         return True
