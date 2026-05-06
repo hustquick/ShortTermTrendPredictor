@@ -9,6 +9,7 @@ import pandas as pd
 from config import (
     CAT_WEIGHT,
     ENABLE_LONG_SIGNALS,
+    ENABLE_LONG_REGIME_FILTER,
     ENABLE_SHORT_SIGNALS,
     ENABLE_SIGNAL_STABILITY_FILTER,
     ENABLE_SIGNAL_QUALITY_GATE,
@@ -17,6 +18,10 @@ from config import (
     LONG_STABILITY_THRESHOLD,
     LONG_STABILITY_WINDOW,
     LONG_SIGNAL_THRESHOLD,
+    LONG_REGIME_REQUIRE_EMA_20_60_POSITIVE,
+    LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE,
+    LONG_REGIME_MAX_RET_5,
+    LONG_REGIME_MIN_CLOSE_POSITION,
     MODEL_FILE,
     RANDOM_STATE,
     SHORT_STABILITY_MIN_COUNT,
@@ -178,6 +183,37 @@ class SingleDirectionModel:
 
         return False
 
+    def _passes_long_regime_filter(self, X: pd.DataFrame) -> bool:
+        """
+        只允许可见趋势和动能配合的做多信号通过。
+        """
+        if not ENABLE_LONG_REGIME_FILTER:
+            return True
+
+        row = X.iloc[0]
+
+        if LONG_REGIME_REQUIRE_EMA_20_60_POSITIVE:
+            ema_20_60_diff = self._feature_value(row, "ema_20_60_diff")
+            if ema_20_60_diff <= 0:
+                return False
+
+        if LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE:
+            macd_hist = self._feature_value(row, "macd_hist")
+            if macd_hist <= 0:
+                return False
+
+        if LONG_REGIME_MAX_RET_5 is not None:
+            ret_5 = self._feature_value(row, "ret_5")
+            if ret_5 >= LONG_REGIME_MAX_RET_5:
+                return False
+
+        if LONG_REGIME_MIN_CLOSE_POSITION is not None:
+            close_position = self._feature_value(row, "close_position")
+            if close_position <= LONG_REGIME_MIN_CLOSE_POSITION:
+                return False
+
+        return True
+
     def predict_one(self, X: pd.DataFrame, signal_filter: ProbabilityStabilityFilter | None = None):
         p_up = float(self.predict_proba(X)[0, 1])
 
@@ -201,8 +237,12 @@ class SingleDirectionModel:
 
         if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
             is_valid_signal = signal_filter.accept(signal, p_up)
-            if is_valid_signal:
-                signal_filter.register_signal()
+
+        if signal == "up" and is_valid_signal:
+            is_valid_signal = self._passes_long_regime_filter(X)
+
+        if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
+            signal_filter.register_signal()
 
         if signal in {"up", "down"} and not is_valid_signal:
             signal = "no_trade"
