@@ -23,6 +23,7 @@ from config import (
     LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE,
     LONG_REGIME_MAX_RET_5,
     LONG_REGIME_MIN_CLOSE_POSITION,
+    LONG_REGIME_MIN_RET_30,
     MODEL_FILE,
     RANDOM_STATE,
     SHORT_STABILITY_MIN_COUNT,
@@ -32,6 +33,7 @@ from config import (
     SHORT_REGIME_AGGRESSIVE_BUY_MIN_BODY_RATIO,
     SHORT_REGIME_AGGRESSIVE_BUY_MIN_TAKER_RATIO,
     SHORT_REGIME_AGGRESSIVE_BUY_MIN_TREND,
+    SHORT_REGIME_MAX_RSI_14,
     SHORT_REGIME_MAX_RET_30,
     SHORT_REGIME_MIN_RET_10,
     SHORT_REGIME_MIN_RET_30,
@@ -224,6 +226,11 @@ class SingleDirectionModel:
             if close_position <= LONG_REGIME_MIN_CLOSE_POSITION:
                 return False
 
+        if LONG_REGIME_MIN_RET_30 is not None:
+            ret_30 = self._feature_value(row, "ret_30")
+            if ret_30 <= LONG_REGIME_MIN_RET_30:
+                return False
+
         return True
 
     def _passes_short_regime_filter(self, X: pd.DataFrame) -> bool:
@@ -258,6 +265,11 @@ class SingleDirectionModel:
         if SHORT_REGIME_MIN_RET_10 is not None:
             ret_10 = self._feature_value(row, "ret_10")
             if ret_10 <= SHORT_REGIME_MIN_RET_10:
+                return False
+
+        if SHORT_REGIME_MAX_RSI_14 is not None:
+            rsi_14 = self._feature_value(row, "rsi_14")
+            if rsi_14 >= SHORT_REGIME_MAX_RSI_14:
                 return False
 
         if SHORT_REGIME_SKIP_AGGRESSIVE_BUY_CANDLE:
