@@ -10,6 +10,7 @@ from config import (
     CAT_WEIGHT,
     ENABLE_LONG_SIGNALS,
     ENABLE_LONG_REGIME_FILTER,
+    ENABLE_SHORT_REGIME_FILTER,
     ENABLE_SHORT_SIGNALS,
     ENABLE_SIGNAL_STABILITY_FILTER,
     ENABLE_SIGNAL_QUALITY_GATE,
@@ -27,6 +28,8 @@ from config import (
     SHORT_STABILITY_MIN_COUNT,
     SHORT_STABILITY_THRESHOLD,
     SHORT_STABILITY_WINDOW,
+    SHORT_REGIME_MIN_CLOSE_POSITION,
+    SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE,
     SIGNAL_MIN_INTERVAL_MINUTES,
     SHORT_SIGNAL_THRESHOLD,
     SIGNAL_MIN_TREND_AGREEMENT,
@@ -214,6 +217,27 @@ class SingleDirectionModel:
 
         return True
 
+    def _passes_short_regime_filter(self, X: pd.DataFrame) -> bool:
+        """
+        只允许可见反弹偏弱、动能仍偏空的做空信号通过。
+        """
+        if not ENABLE_SHORT_REGIME_FILTER:
+            return True
+
+        row = X.iloc[0]
+
+        if SHORT_REGIME_MIN_CLOSE_POSITION is not None:
+            close_position = self._feature_value(row, "close_position")
+            if close_position <= SHORT_REGIME_MIN_CLOSE_POSITION:
+                return False
+
+        if SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE:
+            macd_hist = self._feature_value(row, "macd_hist")
+            if macd_hist >= 0:
+                return False
+
+        return True
+
     def predict_one(self, X: pd.DataFrame, signal_filter: ProbabilityStabilityFilter | None = None):
         p_up = float(self.predict_proba(X)[0, 1])
 
@@ -240,6 +264,9 @@ class SingleDirectionModel:
 
         if signal == "up" and is_valid_signal:
             is_valid_signal = self._passes_long_regime_filter(X)
+
+        if signal == "down" and is_valid_signal:
+            is_valid_signal = self._passes_short_regime_filter(X)
 
         if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
             signal_filter.register_signal()
