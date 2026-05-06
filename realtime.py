@@ -4,15 +4,21 @@ import json
 import time
 
 import pandas as pd
+import requests
 
 from config import (
     CSV_COLUMNS,
+    ENABLE_WECHAT_NOTIFICATIONS,
     PENDING_FILE,
     PREDICTIONS_CSV,
     PREDICT_HORIZON_MS,
+    PREDICT_HORIZON_MINUTES,
     REALTIME_INTERVAL_SECONDS,
+    REQUEST_VERIFY_SSL,
     RETRAIN_INTERVAL_SECONDS,
     TRAIN_MINUTES,
+    WECHAT_REQUEST_TIMEOUT,
+    WECHAT_WEBHOOK_URL,
 )
 from data_download import (
     fetch_klines_between,
@@ -23,6 +29,155 @@ from data_download import (
 from features import make_realtime_features
 from run_strategy import actual_direction
 from trainer import ProbabilityStabilityFilter, load_model, train_and_save
+
+
+def direction_to_cn(direction: str) -> str:
+    if direction == "up":
+        return "上涨"
+    if direction == "down":
+        return "下跌"
+    return "无交易"
+
+
+def format_price(price: float) -> str:
+    return f"${float(price):,.2f}"
+
+
+def format_percent(value: float) -> str:
+    return f"{float(value) * 100:.1f}%"
+
+
+def is_truthy(value) -> bool:
+    return str(value).lower() == "true"
+
+
+def send_wechat_markdown(content: str) -> bool:
+    """
+    发送企业微信 markdown 通知。
+
+    通知失败不影响预测和 CSV 写入。
+    """
+    if not ENABLE_WECHAT_NOTIFICATIONS:
+        return False
+
+    if not WECHAT_WEBHOOK_URL:
+        print("[通知] 未配置企业微信 webhook，跳过。")
+        return False
+
+    payload = {
+        "msgtype": "markdown",
+        "markdown": {
+            "content": content,
+        },
+    }
+
+    try:
+        resp = requests.post(
+            WECHAT_WEBHOOK_URL,
+            json=payload,
+            timeout=WECHAT_REQUEST_TIMEOUT,
+            verify=REQUEST_VERIFY_SSL,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("errcode") != 0:
+            print(f"[通知] 企业微信返回异常: {data}")
+            return False
+
+        print("[通知] 企业微信通知已发送。")
+        return True
+
+    except Exception as exc:
+        print(f"[通知] 企业微信通知失败: {type(exc).__name__}: {exc}")
+        return False
+
+
+def high_confidence_stats() -> tuple[int, int, float | None]:
+    """
+    统计已完成验证的高置信信号命中情况。
+    """
+    df = read_predictions_csv()
+
+    if df.empty:
+        return 0, 0, None
+
+    valid_mask = df["is_valid_signal"].astype(str).str.lower() == "true"
+    done_mask = df["is_correct"].astype(str).str.lower().isin({"true", "false"})
+    signal_df = df[valid_mask & done_mask].copy()
+
+    total = len(signal_df)
+    if total == 0:
+        return 0, 0, None
+
+    correct = int((signal_df["is_correct"].astype(str).str.lower() == "true").sum())
+    return correct, total, correct / total
+
+
+def notify_high_confidence_signal(row: dict):
+    if not is_truthy(row.get("is_valid_signal")):
+        return
+
+    pred_dir = row.get("predicted_direction")
+    if pred_dir not in {"up", "down"}:
+        return
+
+    direction_icon = "📈" if pred_dir == "up" else "📉"
+    content = "\n".join(
+        [
+            f"{direction_icon} 方向：{direction_to_cn(pred_dir)}",
+            f"⏰ 预测时间: {row['timestamp']}",
+            f"💰 当前价格：{format_price(float(row['current_price']))}",
+            f"⭐ 置信度: {format_percent(float(row['confidence']))}",
+            "🛡️ 风控：通过",
+        ]
+    )
+    send_wechat_markdown(content)
+
+
+def notify_signal_validation(
+    *,
+    timestamp: str,
+    future_timestamp: str,
+    current_price: float,
+    future_price: float,
+    predicted_direction: str,
+    actual_direction_value: str,
+    confidence: float,
+    is_correct: bool,
+):
+    if predicted_direction not in {"up", "down"}:
+        return
+
+    correct, total, win_rate = high_confidence_stats()
+    if win_rate is None:
+        stats_line = "📊 高置信度预测中：暂无已完成验证记录。"
+    else:
+        stats_line = (
+            f"📊 高置信度预测中：{correct}/{total}"
+            f"（{win_rate * 100:.1f}%）预测正确！"
+        )
+
+    result_icon = "✅" if is_correct else "❌"
+    note = "模型本次预测命中" if is_correct else "请注意，模型本次预测未命中"
+    start_hm = timestamp[11:16]
+    end_hm = future_timestamp[11:16]
+
+    content = "\n".join(
+        [
+            f"{result_icon} {PREDICT_HORIZON_MINUTES}分钟比特币验证 | {start_hm} -> {end_hm}",
+            f"⏰ 预测时间: {timestamp}",
+            f"💰 预测时价格: {format_price(current_price)}",
+            f"💰 验证时价格: {format_price(future_price)}",
+            f"🔄 预测方向: {direction_to_cn(predicted_direction)}",
+            f"🔄 实际方向: {direction_to_cn(actual_direction_value)}",
+            f"⭐ 置信度: {format_percent(confidence)}",
+            "",
+            f"📌 {note}",
+            stats_line,
+        ]
+    )
+    send_wechat_markdown(content)
 
 
 def ensure_predictions_csv():
@@ -310,6 +465,7 @@ def make_live_prediction(model, signal_filter: ProbabilityStabilityFilter):
     }
 
     append_prediction_row_immediately(row)
+    notify_high_confidence_signal(row)
 
     item = {
         "timestamp_ms": timestamp_ms,
@@ -413,6 +569,7 @@ def validate_pending_predictions():
 
             if updated:
                 completed_count += 1
+                future_timestamp_str = ms_to_beijing_time(future_ms)
 
                 print(
                     "[验证完成]",
@@ -423,6 +580,18 @@ def validate_pending_predictions():
                     f"actual={act_dir}",
                     f"correct={correct}",
                 )
+
+                if is_truthy(item.get("is_valid_signal")) and pred_dir in {"up", "down"}:
+                    notify_signal_validation(
+                        timestamp=timestamp_str,
+                        future_timestamp=future_timestamp_str,
+                        current_price=current_price,
+                        future_price=float(future_price),
+                        predicted_direction=pred_dir,
+                        actual_direction_value=act_dir,
+                        confidence=float(item.get("confidence", 0.0)),
+                        is_correct=bool(correct),
+                    )
             else:
                 print("[验证] CSV 回填失败，继续保留 pending:", timestamp_str)
                 remaining.append(item)
