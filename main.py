@@ -10,6 +10,7 @@ from config import (
     BACKTEST_PROGRESS_EVERY,
     BACKTEST_STEP_MINUTES,
     BACKTEST_TRAIN_WINDOW_MINUTES,
+    DUAL_MODEL_TUNE_DAYS,
     STRICT_PARAM_SEARCH_CSV,
     STRICT_PARAM_SEARCH_ENABLED,
     STRICT_PARAM_SEARCH_TOP_N,
@@ -72,6 +73,49 @@ def run_realtime():
     realtime_loop()
 
 
+def run_tune_dual_model(
+    tune_days: int | None = None,
+    no_update_cache: bool = False,
+):
+    """
+    双子模型自动调参。
+
+    该模式会：
+    - 读取最近 tune_days 天 1m 历史数据；
+    - 按时间顺序切分训练集和验证集；
+    - 分别为 up 子模型和 down 子模型搜索超参数；
+    - 保存 models/dual_model_params.json；
+    - 保存 data/dual_model_tuning_report.csv。
+    """
+    from dual_model_tuner import tune_dual_model_params
+
+    if tune_days is None:
+        tune_days = DUAL_MODEL_TUNE_DAYS
+
+    minutes = tune_days * 24 * 60
+
+    print("[双子模型调参] 准备历史数据...")
+    print(f"[双子模型调参] 调参天数：{tune_days} 天")
+    print(f"[双子模型调参] 需要分钟数：{minutes}")
+    print(f"[双子模型调参] 是否禁止更新缓存：{no_update_cache}")
+
+    try:
+        df = get_recent_klines_with_cache(
+            minutes=minutes,
+            update_if_needed=not no_update_cache,
+        )
+    except Exception as exc:
+        print(f"[双子模型调参] 获取历史数据失败: {type(exc).__name__}: {exc}")
+        return
+
+    if df.empty:
+        print("[双子模型调参] 数据为空。")
+        return
+
+    print(f"[双子模型调参] 数据量：{len(df)}")
+    tune_dual_model_params(df)
+
+
 def run_strict_backtest(
     backtest_days: int | None = None,
     step_minutes: int | None = None,
@@ -81,17 +125,6 @@ def run_strict_backtest(
 ):
     """
     严格时序回测。
-
-    数据逻辑：
-    - 优先读取 data/BTCUSDT_1m_history.csv；
-    - 如果本地数据不存在，则下载；
-    - 如果本地数据不足或不是最新，则补充缺失区间；
-    - 如果传入 --no-update-cache，则只使用本地已有数据，不主动联网补充。
-
-    回测逻辑：
-    - 固定逐根 1m K 线滚动验证；
-    - 每 1 分钟产生一次预测；
-    - 预测目标仍为未来第 10 分钟 close 高于或低于当前 close。
     """
     if backtest_days is None:
         backtest_days = BACKTEST_DAYS
@@ -242,8 +275,14 @@ def main():
         "--mode",
         type=str,
         default="realtime",
-        choices=["train", "realtime", "training_backtest", "strict_backtest"],
-        help="运行模式：train / realtime / training_backtest / strict_backtest",
+        choices=[
+            "train",
+            "realtime",
+            "training_backtest",
+            "strict_backtest",
+            "tune_dual_model",
+        ],
+        help="运行模式：train / realtime / training_backtest / strict_backtest / tune_dual_model",
     )
 
     parser.add_argument(
@@ -251,6 +290,13 @@ def main():
         type=int,
         default=None,
         help="严格回测拉取最近多少天数据，例如 7 或 14。",
+    )
+
+    parser.add_argument(
+        "--tune-days",
+        type=int,
+        default=None,
+        help="双子模型自动调参使用最近多少天数据，默认读取配置 DUAL_MODEL_TUNE_DAYS。",
     )
 
     parser.add_argument(
@@ -277,7 +323,7 @@ def main():
     parser.add_argument(
         "--no-update-cache",
         action="store_true",
-        help="严格回测时只使用本地历史数据，不联网补充最新数据。",
+        help="只使用本地历史数据，不联网补充最新数据。",
     )
 
     args = parser.parse_args()
@@ -297,6 +343,12 @@ def main():
             step_minutes=args.step_minutes,
             model_update_minutes=args.model_update_minutes,
             max_steps=args.max_steps,
+            no_update_cache=args.no_update_cache,
+        )
+
+    elif args.mode == "tune_dual_model":
+        run_tune_dual_model(
+            tune_days=args.tune_days,
             no_update_cache=args.no_update_cache,
         )
 
