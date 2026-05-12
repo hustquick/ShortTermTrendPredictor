@@ -381,15 +381,8 @@ def strict_walk_forward_backtest(
             act_dir = actual_direction(current_price, future_price)
             raw_pred_dir = raw_probability_direction(float(pred["up_probability"]))
 
-            if pred_dir == "no_trade":
-                correct = False
-            else:
-                correct = pred_dir == act_dir
-
-            if raw_pred_dir == "no_trade":
-                raw_correct = False
-            else:
-                raw_correct = raw_pred_dir == act_dir
+            filtered_correct = None if pred_dir == "no_trade" else pred_dir == act_dir
+            raw_correct = None if raw_pred_dir == "no_trade" else raw_pred_dir == act_dir
 
             row = {
                 "timestamp": ms_to_beijing_time(int(current_row["timestamp"])),
@@ -402,7 +395,8 @@ def strict_walk_forward_backtest(
                 "up_probability": pred["up_probability"],
                 "confidence": pred["confidence"],
                 "is_valid_signal": pred["is_valid_signal"],
-                "is_correct": correct,
+                "is_correct": bool(filtered_correct) if filtered_correct is not None else False,
+                "filtered_is_correct": filtered_correct,
                 "raw_is_correct": raw_correct,
                 "model_trained_at": model_trained_at_time,
             }
@@ -413,12 +407,13 @@ def strict_walk_forward_backtest(
                 f"[严格回测] 完成："
                 f"p_up={pred['up_probability']:.4f}, "
                 f"raw_signal={raw_pred_dir}, "
-                f"signal={pred_dir}, "
+                f"filtered_signal={pred_dir}, "
                 f"actual={act_dir}, "
                 f"future_return={future_return:.6f}, "
                 f"model_at={model_trained_at_time}, "
-                f"valid={pred['is_valid_signal']}, "
-                f"correct={correct}"
+                f"filtered_valid={pred['is_valid_signal']}, "
+                f"filtered_correct={filtered_correct}, "
+                f"raw_correct={raw_correct}"
             )
 
         except Exception as exc:
