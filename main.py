@@ -10,6 +10,8 @@ from config import (
     BACKTEST_PROGRESS_EVERY,
     BACKTEST_STEP_MINUTES,
     BACKTEST_TRAIN_WINDOW_MINUTES,
+    STRICT_PARAM_SEARCH_ENABLED,
+    STRICT_PARAM_SEARCH_TOP_N,
 )
 from data_download import get_recent_klines_with_cache
 from run_strategy import (
@@ -19,6 +21,7 @@ from run_strategy import (
     strict_walk_forward_backtest,
     threshold_search_report,
 )
+from strict_param_search import strict_parameter_search_report
 
 
 def run_train():
@@ -158,6 +161,16 @@ def run_strict_backtest(
             print("  无阈值搜索结果。")
         else:
             print(threshold_report.head(30).to_string(index=False))
+
+        if STRICT_PARAM_SEARCH_ENABLED:
+            print("[严格回测] 参数组合自动搜索结果：")
+            strict_param_report = strict_parameter_search_report(result)
+            if strict_param_report.empty:
+                print("  无参数组合搜索结果。")
+            else:
+                print(strict_param_report.head(STRICT_PARAM_SEARCH_TOP_N).to_string(index=False))
+        else:
+            print("[严格回测] 参数组合自动搜索已关闭。")
 
     valid_signals = report["valid_signals"]
 
