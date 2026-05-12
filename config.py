@@ -23,6 +23,8 @@ HISTORY_CSV = DATA_DIR / "BTCUSDT_1m_history.csv"
 PREDICTIONS_CSV = DATA_DIR / "predictions.csv"
 PENDING_FILE = DATA_DIR / "pending_predictions.jsonl"
 MODEL_FILE = MODEL_DIR / "dual_backtest_ensemble_model.pkl"
+DUAL_MODEL_PARAMS_FILE = MODEL_DIR / "dual_model_params.json"
+DUAL_MODEL_TUNING_REPORT_CSV = DATA_DIR / "dual_model_tuning_report.csv"
 STRICT_PARAM_SEARCH_CSV = DATA_DIR / "strict_param_search_report.csv"
 
 # =========================
@@ -44,11 +46,9 @@ INTERVAL = "1m"
 
 INTERVAL_MS = 60_000
 
-# 实时训练使用最近 48 小时
 TRAIN_HOURS = 48
 TRAIN_MINUTES = TRAIN_HOURS * 60
 
-# 严格回测拉取最近 N 天数据
 BACKTEST_DAYS = 7
 BACKTEST_MINUTES = BACKTEST_DAYS * 24 * 60
 
@@ -72,8 +72,6 @@ WECHAT_REQUEST_TIMEOUT = 10
 # 预测任务配置
 # =========================
 
-# 核心任务：
-# 每 1 分钟滚动预测一次，判断未来第 10 分钟 close 是否高于当前 close。
 PREDICT_HORIZON_MINUTES = 10
 PREDICT_HORIZON_MS = PREDICT_HORIZON_MINUTES * INTERVAL_MS
 
@@ -89,8 +87,6 @@ SHORT_SIGNAL_THRESHOLD = 0.20
 ENABLE_LONG_SIGNALS = True
 ENABLE_SHORT_SIGNALS = True
 
-# 双方向子模型方向优势门槛。
-# up_signal_probability 与 down_signal_probability 差值不足时，视为方向不清晰。
 DUAL_DIRECTION_MIN_EDGE = 0.10
 
 ENABLE_SIGNAL_STABILITY_FILTER = True
@@ -176,6 +172,74 @@ STRICT_PARAM_RECOMMEND_MIN_SIGNALS = 300
 STRICT_PARAM_RECOMMEND_MIN_WIN_RATE = 0.54
 STRICT_PARAM_RECOMMEND_MIN_SIGNAL_RATIO = 0.10
 STRICT_PARAM_RECOMMEND_MIN_SIDE_SIGNALS = 50
+
+# =========================
+# 双子模型自动调参配置
+# =========================
+
+DUAL_MODEL_TUNE_DAYS = 30
+DUAL_MODEL_TUNE_VALID_RATIO = 0.30
+DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 12
+DUAL_MODEL_TUNE_MIN_VALID_SIGNALS = 80
+DUAL_MODEL_TUNE_MIN_WIN_RATE = 0.54
+
+DUAL_MODEL_PARAM_GRID = [
+    {
+        "n_estimators": 160,
+        "learning_rate": 0.05,
+        "max_depth": 3,
+        "num_leaves": 7,
+        "min_child_samples": 80,
+        "subsample": 0.80,
+        "colsample_bytree": 0.80,
+        "reg_alpha": 0.20,
+        "reg_lambda": 2.00,
+    },
+    {
+        "n_estimators": 220,
+        "learning_rate": 0.04,
+        "max_depth": 4,
+        "num_leaves": 15,
+        "min_child_samples": 60,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "reg_alpha": 0.15,
+        "reg_lambda": 1.50,
+    },
+    {
+        "n_estimators": 320,
+        "learning_rate": 0.035,
+        "max_depth": 5,
+        "num_leaves": 31,
+        "min_child_samples": 40,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "reg_alpha": 0.10,
+        "reg_lambda": 1.00,
+    },
+    {
+        "n_estimators": 500,
+        "learning_rate": 0.03,
+        "max_depth": 6,
+        "num_leaves": 31,
+        "min_child_samples": 25,
+        "subsample": 0.95,
+        "colsample_bytree": 0.95,
+        "reg_alpha": 0.05,
+        "reg_lambda": 0.50,
+    },
+    {
+        "n_estimators": 800,
+        "learning_rate": 0.035,
+        "max_depth": 8,
+        "num_leaves": 63,
+        "min_child_samples": 10,
+        "subsample": 1.00,
+        "colsample_bytree": 1.00,
+        "reg_alpha": 0.00,
+        "reg_lambda": 0.00,
+    },
+]
 
 # =========================
 # 模型配置
