@@ -8,6 +8,7 @@ import pandas as pd
 
 from config import (
     CAT_WEIGHT,
+    DUAL_DIRECTION_MIN_EDGE,
     ENABLE_LONG_SIGNALS,
     ENABLE_LONG_REGIME_FILTER,
     ENABLE_SHORT_REGIME_FILTER,
@@ -375,11 +376,12 @@ class DualDirectionModel(SingleDirectionModel):
         self.down_models = down_models
         self.feature_cols = feature_cols
 
-    def predict_direction_scores(self, X: pd.DataFrame) -> tuple[float, float, float]:
+    def predict_direction_scores(self, X: pd.DataFrame) -> tuple[float, float, float, float]:
         X = X[self.feature_cols]
 
         p_up_signal = float(_ensemble_predict_proba(self.up_models, X)[0])
         p_down_signal = float(_ensemble_predict_proba(self.down_models, X)[0])
+        direction_edge = p_up_signal - p_down_signal
         score_sum = p_up_signal + p_down_signal
 
         if score_sum <= 1e-12:
@@ -387,24 +389,30 @@ class DualDirectionModel(SingleDirectionModel):
         else:
             p_up_relative = p_up_signal / score_sum
 
-        return p_up_signal, p_down_signal, p_up_relative
+        return p_up_signal, p_down_signal, p_up_relative, direction_edge
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        _, _, p_up_relative = self.predict_direction_scores(X)
+        _, _, p_up_relative, _ = self.predict_direction_scores(X)
         return np.array([[1 - p_up_relative, p_up_relative]])
 
     def predict_one(self, X: pd.DataFrame, signal_filter: ProbabilityStabilityFilter | None = None):
-        p_up_signal, p_down_signal, p_up_relative = self.predict_direction_scores(X)
+        p_up_signal, p_down_signal, p_up_relative, direction_edge = self.predict_direction_scores(X)
 
         if signal_filter is not None:
             signal_filter.update(p_up_relative)
 
-        if p_up_signal >= LONG_SIGNAL_THRESHOLD and p_up_signal > p_down_signal:
+        if (
+            p_up_signal >= LONG_SIGNAL_THRESHOLD
+            and direction_edge >= DUAL_DIRECTION_MIN_EDGE
+        ):
             signal = "up"
             confidence = p_up_signal
             is_valid_signal = ENABLE_LONG_SIGNALS and self._passes_signal_quality_gate(X, signal)
 
-        elif p_down_signal >= 1.0 - SHORT_SIGNAL_THRESHOLD and p_down_signal > p_up_signal:
+        elif (
+            p_down_signal >= 1.0 - SHORT_SIGNAL_THRESHOLD
+            and direction_edge <= -DUAL_DIRECTION_MIN_EDGE
+        ):
             signal = "down"
             confidence = p_down_signal
             is_valid_signal = ENABLE_SHORT_SIGNALS and self._passes_signal_quality_gate(X, signal)
@@ -434,6 +442,7 @@ class DualDirectionModel(SingleDirectionModel):
             "up_probability": p_up_relative,
             "up_signal_probability": p_up_signal,
             "down_signal_probability": p_down_signal,
+            "direction_edge": direction_edge,
             "confidence": confidence,
             "is_valid_signal": bool(is_valid_signal),
         }
