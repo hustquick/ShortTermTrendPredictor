@@ -51,7 +51,7 @@ from config import (
     TIME_DECAY_STRENGTH,
     XGB_WEIGHT,
 )
-from features import make_train_dataset
+from features import make_dual_train_dataset, make_train_dataset
 
 
 class ProbabilityStabilityFilter:
@@ -124,6 +124,31 @@ def make_time_decay_weights(n: int) -> np.ndarray:
     return weights
 
 
+def _validate_binary_target(y: pd.Series, name: str, min_positive: int = 20):
+    if y.nunique() < 2:
+        raise ValueError(f"{name} 只有一个类别，无法训练方向子模型。")
+
+    positive_count = int((y == 1).sum())
+    if positive_count < min_positive:
+        raise ValueError(f"{name} 正样本过少：{positive_count}，至少需要 {min_positive} 条。")
+
+
+def _ensemble_predict_proba(models: tuple, X: pd.DataFrame) -> np.ndarray:
+    lgb_model, xgb_model, cat_model = models
+
+    p_lgb = lgb_model.predict_proba(X)[:, 1]
+    p_xgb = xgb_model.predict_proba(X)[:, 1]
+    p_cat = cat_model.predict_proba(X)[:, 1]
+
+    probability = (
+        LGB_WEIGHT * p_lgb
+        + XGB_WEIGHT * p_xgb
+        + CAT_WEIGHT * p_cat
+    )
+
+    return np.clip(probability, 0.0, 1.0)
+
+
 class SingleDirectionModel:
     """
     单一方向模型。
@@ -143,19 +168,10 @@ class SingleDirectionModel:
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         X = X[self.feature_cols]
-
-        p_lgb = self.lgb_model.predict_proba(X)[:, 1]
-        p_xgb = self.xgb_model.predict_proba(X)[:, 1]
-        p_cat = self.cat_model.predict_proba(X)[:, 1]
-
-        p_up = (
-            LGB_WEIGHT * p_lgb
-            + XGB_WEIGHT * p_xgb
-            + CAT_WEIGHT * p_cat
+        p_up = _ensemble_predict_proba(
+            (self.lgb_model, self.xgb_model, self.cat_model),
+            X,
         )
-
-        p_up = np.clip(p_up, 0.0, 1.0)
-
         return np.vstack([1 - p_up, p_up]).T
 
     @staticmethod
@@ -166,11 +182,6 @@ class SingleDirectionModel:
         return float(value)
 
     def _passes_signal_quality_gate(self, X: pd.DataFrame, direction: str) -> bool:
-        """
-        只用当前及过去特征做信号过滤。
-
-        目的不是提高全局准确率，而是减少高置信反趋势误报。
-        """
         if not ENABLE_SIGNAL_QUALITY_GATE:
             return True
 
@@ -202,9 +213,6 @@ class SingleDirectionModel:
         return False
 
     def _passes_long_regime_filter(self, X: pd.DataFrame) -> bool:
-        """
-        只允许可见趋势和动能配合的做多信号通过。
-        """
         if not ENABLE_LONG_REGIME_FILTER:
             return True
 
@@ -252,9 +260,6 @@ class SingleDirectionModel:
         return True
 
     def _passes_short_regime_filter(self, X: pd.DataFrame) -> bool:
-        """
-        只允许可见反弹偏弱、动能仍偏空的做空信号通过。
-        """
         if not ENABLE_SHORT_REGIME_FILTER:
             return True
 
@@ -348,6 +353,87 @@ class SingleDirectionModel:
         return {
             "predicted_direction": signal,
             "up_probability": p_up,
+            "confidence": confidence,
+            "is_valid_signal": bool(is_valid_signal),
+        }
+
+
+class DualDirectionModel(SingleDirectionModel):
+    """
+    双方向子模型。
+
+    - up 子模型专门学习未来显著上涨机会；
+    - down 子模型专门学习未来显著下跌机会；
+    - 最终方向由两个子模型的强弱比较决定。
+
+    为兼容原有代码，仍然返回 up_probability 字段。
+    这里的 up_probability 是经过双模型归一化后的上涨相对强度。
+    """
+
+    def __init__(self, up_models: tuple, down_models: tuple, feature_cols):
+        self.up_models = up_models
+        self.down_models = down_models
+        self.feature_cols = feature_cols
+
+    def predict_direction_scores(self, X: pd.DataFrame) -> tuple[float, float, float]:
+        X = X[self.feature_cols]
+
+        p_up_signal = float(_ensemble_predict_proba(self.up_models, X)[0])
+        p_down_signal = float(_ensemble_predict_proba(self.down_models, X)[0])
+        score_sum = p_up_signal + p_down_signal
+
+        if score_sum <= 1e-12:
+            p_up_relative = 0.5
+        else:
+            p_up_relative = p_up_signal / score_sum
+
+        return p_up_signal, p_down_signal, p_up_relative
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        _, _, p_up_relative = self.predict_direction_scores(X)
+        return np.array([[1 - p_up_relative, p_up_relative]])
+
+    def predict_one(self, X: pd.DataFrame, signal_filter: ProbabilityStabilityFilter | None = None):
+        p_up_signal, p_down_signal, p_up_relative = self.predict_direction_scores(X)
+
+        if signal_filter is not None:
+            signal_filter.update(p_up_relative)
+
+        if p_up_signal >= LONG_SIGNAL_THRESHOLD and p_up_signal > p_down_signal:
+            signal = "up"
+            confidence = p_up_signal
+            is_valid_signal = ENABLE_LONG_SIGNALS and self._passes_signal_quality_gate(X, signal)
+
+        elif p_down_signal >= 1.0 - SHORT_SIGNAL_THRESHOLD and p_down_signal > p_up_signal:
+            signal = "down"
+            confidence = p_down_signal
+            is_valid_signal = ENABLE_SHORT_SIGNALS and self._passes_signal_quality_gate(X, signal)
+
+        else:
+            signal = "no_trade"
+            confidence = max(p_up_signal, p_down_signal)
+            is_valid_signal = False
+
+        if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
+            is_valid_signal = signal_filter.accept(signal, p_up_relative)
+
+        if signal == "up" and is_valid_signal:
+            is_valid_signal = self._passes_long_regime_filter(X)
+
+        if signal == "down" and is_valid_signal:
+            is_valid_signal = self._passes_short_regime_filter(X)
+
+        if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
+            signal_filter.register_signal()
+
+        if signal in {"up", "down"} and not is_valid_signal:
+            signal = "no_trade"
+
+        return {
+            "predicted_direction": signal,
+            "up_probability": p_up_relative,
+            "up_signal_probability": p_up_signal,
+            "down_signal_probability": p_down_signal,
             "confidence": confidence,
             "is_valid_signal": bool(is_valid_signal),
         }
@@ -456,6 +542,20 @@ def _make_cat_model(mode: str):
     )
 
 
+def _fit_ensemble(X: pd.DataFrame, y: pd.Series, mode: str):
+    weights = make_time_decay_weights(len(X))
+
+    lgb_model = _make_lgb_model(mode)
+    xgb_model = _make_xgb_model(mode)
+    cat_model = _make_cat_model(mode)
+
+    lgb_model.fit(X, y, sample_weight=weights)
+    xgb_model.fit(X, y, sample_weight=weights)
+    cat_model.fit(X, y, sample_weight=weights)
+
+    return lgb_model, xgb_model, cat_model
+
+
 def train_single_direction_model(df: pd.DataFrame, mode: str = "validation") -> SingleDirectionModel:
     """
     训练单一方向模型。
@@ -480,18 +580,9 @@ def train_single_direction_model(df: pd.DataFrame, mode: str = "validation") -> 
     if len(X) < min_samples:
         raise ValueError(f"训练样本过少：{len(X)}，至少需要 {min_samples} 条有效样本。")
 
-    if y.nunique() < 2:
-        raise ValueError("label 只有一个类别，无法训练方向模型。")
+    _validate_binary_target(y, "label")
 
-    weights = make_time_decay_weights(len(X))
-
-    lgb_model = _make_lgb_model(mode)
-    xgb_model = _make_xgb_model(mode)
-    cat_model = _make_cat_model(mode)
-
-    lgb_model.fit(X, y, sample_weight=weights)
-    xgb_model.fit(X, y, sample_weight=weights)
-    cat_model.fit(X, y, sample_weight=weights)
+    lgb_model, xgb_model, cat_model = _fit_ensemble(X, y, mode)
 
     return SingleDirectionModel(
         lgb_model=lgb_model,
@@ -501,20 +592,55 @@ def train_single_direction_model(df: pd.DataFrame, mode: str = "validation") -> 
     )
 
 
-def train_validation_model(df: pd.DataFrame) -> SingleDirectionModel:
+def train_dual_direction_model(df: pd.DataFrame, mode: str = "validation") -> DualDirectionModel:
+    """
+    训练双方向子模型。
+
+    up 子模型和 down 子模型使用同一组特征，但分别学习不同目标。
+    """
+    try:
+        import lightgbm  # noqa: F401
+        import xgboost  # noqa: F401
+        import catboost  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "缺少模型依赖，请先执行：pip install -r requirements.txt"
+        ) from exc
+
+    X, y_up, y_down, data, feature_cols = make_dual_train_dataset(df)
+
+    min_samples = 250 if mode == "validation" else 200
+
+    if len(X) < min_samples:
+        raise ValueError(f"训练样本过少：{len(X)}，至少需要 {min_samples} 条有效样本。")
+
+    _validate_binary_target(y_up, "up_label")
+    _validate_binary_target(y_down, "down_label")
+
+    up_models = _fit_ensemble(X, y_up, mode)
+    down_models = _fit_ensemble(X, y_down, mode)
+
+    return DualDirectionModel(
+        up_models=up_models,
+        down_models=down_models,
+        feature_cols=feature_cols,
+    )
+
+
+def train_validation_model(df: pd.DataFrame) -> DualDirectionModel:
     """
     严格验证使用的模型。
 
-    该阶段只保证数据切分无未来泄露；模型参数仍按需求刻意过拟合局部窗口。
+    默认使用双方向子模型：一个预测显著上涨机会，一个预测显著下跌机会。
     """
-    return train_single_direction_model(df, mode="validation")
+    return train_dual_direction_model(df, mode="validation")
 
 
-def train_overfit_model(df: pd.DataFrame) -> SingleDirectionModel:
+def train_overfit_model(df: pd.DataFrame) -> DualDirectionModel:
     """
     实时局部拟合使用的激进模型。
     """
-    return train_single_direction_model(df, mode="overfit")
+    return train_dual_direction_model(df, mode="overfit")
 
 
 def save_model(model: SingleDirectionModel, path=MODEL_FILE):
@@ -531,6 +657,6 @@ def load_model(path=MODEL_FILE):
 
 
 def train_and_save(df: pd.DataFrame, path=MODEL_FILE, mode: str = "overfit"):
-    model = train_single_direction_model(df, mode=mode)
+    model = train_dual_direction_model(df, mode=mode)
     save_model(model, path=path)
     return model
