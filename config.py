@@ -23,6 +23,7 @@ HISTORY_CSV = DATA_DIR / "BTCUSDT_1m_history.csv"
 PREDICTIONS_CSV = DATA_DIR / "predictions.csv"
 PENDING_FILE = DATA_DIR / "pending_predictions.jsonl"
 MODEL_FILE = MODEL_DIR / "dual_backtest_ensemble_model.pkl"
+STRICT_PARAM_SEARCH_CSV = DATA_DIR / "strict_param_search_report.csv"
 
 # =========================
 # 币安数据配置
@@ -195,6 +196,13 @@ STRICT_PARAM_SEARCH_SHORT_THRESHOLDS = [
     0.05,
 ]
 STRICT_PARAM_SEARCH_TOP_N = 20
+
+# 自动推荐参数的最低要求。
+# 仅用于回测报告中的建议，不会自动改写正式交易参数。
+STRICT_PARAM_RECOMMEND_MIN_SIGNALS = 300
+STRICT_PARAM_RECOMMEND_MIN_WIN_RATE = 0.54
+STRICT_PARAM_RECOMMEND_MIN_SIGNAL_RATIO = 0.10
+STRICT_PARAM_RECOMMEND_MIN_SIDE_SIGNALS = 50
 
 # =========================
 # 模型配置
