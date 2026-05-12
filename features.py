@@ -263,6 +263,44 @@ def add_future_label(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_dual_future_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    构建双方向子模型标签。
+
+    up_label:
+    - future_return > +LABEL_NEUTRAL_THRESHOLD → 1
+    - 其他有未来价格的样本 → 0
+
+    down_label:
+    - future_return < -LABEL_NEUTRAL_THRESHOLD → 1
+    - 其他有未来价格的样本 → 0
+
+    与单模型不同，中性样本不会被删除，而是作为两个方向模型的负类。
+    """
+    df = df.copy()
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    close_by_timestamp = df.set_index("timestamp")["close"]
+    future_timestamp = df["timestamp"] + PREDICT_HORIZON_MS
+
+    df["future_price"] = future_timestamp.map(close_by_timestamp)
+    df["future_return"] = df["future_price"] / df["close"] - 1
+
+    valid_future = df["future_price"].notna()
+
+    df["up_label"] = np.nan
+    df["down_label"] = np.nan
+
+    df.loc[valid_future, "up_label"] = (
+        df.loc[valid_future, "future_return"] > LABEL_NEUTRAL_THRESHOLD
+    ).astype(int)
+    df.loc[valid_future, "down_label"] = (
+        df.loc[valid_future, "future_return"] < -LABEL_NEUTRAL_THRESHOLD
+    ).astype(int)
+
+    return df
+
+
 def get_feature_columns(df: pd.DataFrame):
     """
     返回模型输入特征列。
@@ -282,6 +320,8 @@ def get_feature_columns(df: pd.DataFrame):
         "future_price",
         "future_return",
         "label",
+        "up_label",
+        "down_label",
     }
 
     return [col for col in df.columns if col not in exclude]
@@ -312,6 +352,35 @@ def make_train_dataset(df: pd.DataFrame):
     y = data["label"].astype(int)
 
     return X, y, data, feature_cols
+
+
+def make_dual_train_dataset(df: pd.DataFrame):
+    """
+    构建双方向模型训练数据。
+
+    返回：
+    - X
+    - y_up
+    - y_down
+    - data
+    - feature_cols
+    """
+    df_feat = build_features(df)
+    df_labeled = add_dual_future_labels(df_feat)
+
+    feature_cols = get_feature_columns(df_labeled)
+
+    data = df_labeled.dropna(
+        subset=feature_cols + ["up_label", "down_label"]
+    ).copy()
+
+    data = data.reset_index(drop=True)
+
+    X = data[feature_cols]
+    y_up = data["up_label"].astype(int)
+    y_down = data["down_label"].astype(int)
+
+    return X, y_up, y_down, data, feature_cols
 
 
 def make_realtime_features(df: pd.DataFrame, feature_cols):
