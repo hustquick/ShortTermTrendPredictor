@@ -168,6 +168,34 @@ PROB_BIN_WIDTH = 0.05
 # 至少多少个信号才认为该阈值组合有参考价值。
 MIN_SIGNALS_FOR_THRESHOLD_SEARCH = 30
 
+# 严格回测参数组合自动搜索：
+# 在一次严格时序回测得到的 p_up 序列上，自动搜索做多/做空概率阈值组合。
+# 该搜索不重复训练模型，因此不会引入未来训练泄露，也不会显著增加回测耗时。
+STRICT_PARAM_SEARCH_ENABLED = True
+STRICT_PARAM_SEARCH_LONG_THRESHOLDS = [
+    0.55,
+    0.60,
+    0.65,
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95,
+]
+STRICT_PARAM_SEARCH_SHORT_THRESHOLDS = [
+    0.45,
+    0.40,
+    0.35,
+    0.30,
+    0.25,
+    0.20,
+    0.15,
+    0.10,
+    0.05,
+]
+STRICT_PARAM_SEARCH_TOP_N = 20
+
 # =========================
 # 模型配置
 # =========================
