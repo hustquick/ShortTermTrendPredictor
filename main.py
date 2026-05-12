@@ -10,6 +10,7 @@ from config import (
     BACKTEST_PROGRESS_EVERY,
     BACKTEST_STEP_MINUTES,
     BACKTEST_TRAIN_WINDOW_MINUTES,
+    STRICT_PARAM_SEARCH_CSV,
     STRICT_PARAM_SEARCH_ENABLED,
     STRICT_PARAM_SEARCH_TOP_N,
 )
@@ -21,7 +22,10 @@ from run_strategy import (
     strict_walk_forward_backtest,
     threshold_search_report,
 )
-from strict_param_search import strict_parameter_search_report
+from strict_param_search import (
+    recommend_strict_parameters,
+    strict_parameter_search_report,
+)
 
 
 def run_train():
@@ -168,7 +172,35 @@ def run_strict_backtest(
             if strict_param_report.empty:
                 print("  无参数组合搜索结果。")
             else:
+                strict_param_report.to_csv(STRICT_PARAM_SEARCH_CSV, index=False)
                 print(strict_param_report.head(STRICT_PARAM_SEARCH_TOP_N).to_string(index=False))
+                print(f"[严格回测] 参数组合搜索结果已保存：{STRICT_PARAM_SEARCH_CSV}")
+
+                recommendation = recommend_strict_parameters(strict_param_report)
+                print("[严格回测] 参数推荐判断：")
+                if recommendation["has_recommendation"]:
+                    print("  结论：发现满足最低要求的候选参数。")
+                    print(f"  推荐做多阈值: {recommendation['recommended_long_threshold']}")
+                    print(f"  推荐做空阈值: {recommendation['recommended_short_threshold']}")
+                    print(f"  总胜率: {recommendation['win_rate']}")
+                    print(f"  有效信号数: {recommendation['valid_signals']}")
+                    print(f"  有效信号占比: {recommendation['valid_signal_ratio']}")
+                    print(f"  做多信号数: {recommendation['long_signals']}")
+                    print(f"  做多胜率: {recommendation['long_win_rate']}")
+                    print(f"  做空信号数: {recommendation['short_signals']}")
+                    print(f"  做空胜率: {recommendation['short_win_rate']}")
+                    print(f"  综合分数: {recommendation['score']}")
+                    print(f"  原因: {recommendation['reason']}")
+                    print("  注意：系统不会自动改写 config.py，请结合更长周期回测后手动决定。")
+                else:
+                    print("  结论：暂不建议更新正式交易参数。")
+                    print(f"  原因: {recommendation['reason']}")
+                    if "best_observed_long_threshold" in recommendation:
+                        print(f"  观察到的最高排序做多阈值: {recommendation['best_observed_long_threshold']}")
+                        print(f"  观察到的最高排序做空阈值: {recommendation['best_observed_short_threshold']}")
+                        print(f"  观察到的胜率: {recommendation['best_observed_win_rate']}")
+                        print(f"  观察到的有效信号数: {recommendation['best_observed_valid_signals']}")
+                        print(f"  观察到的有效信号占比: {recommendation['best_observed_valid_signal_ratio']}")
         else:
             print("[严格回测] 参数组合自动搜索已关闭。")
 
