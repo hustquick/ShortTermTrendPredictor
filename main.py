@@ -87,12 +87,24 @@ def run_strict_backtest(
     - 如果本地数据不存在，则下载；
     - 如果本地数据不足或不是最新，则补充缺失区间；
     - 如果传入 --no-update-cache，则只使用本地已有数据，不主动联网补充。
+
+    回测逻辑：
+    - 固定逐根 1m K 线滚动验证；
+    - 每 1 分钟产生一次预测；
+    - 预测目标仍为未来第 10 分钟 close 高于或低于当前 close。
     """
     if backtest_days is None:
         backtest_days = BACKTEST_DAYS
 
     if step_minutes is None:
         step_minutes = BACKTEST_STEP_MINUTES
+
+    if step_minutes != 1:
+        print(
+            "[严格回测] 注意：严格回测已固定为每 1 分钟逐点验证，"
+            f"忽略传入步长：{step_minutes}。"
+        )
+        step_minutes = 1
 
     if model_update_minutes is None:
         model_update_minutes = BACKTEST_MODEL_UPDATE_MINUTES
@@ -103,6 +115,7 @@ def run_strict_backtest(
     backtest_minutes = backtest_days * 24 * 60
 
     print("[严格回测] 准备历史数据...")
+    print("[严格回测] 回测方式：每 1 分钟预测一次，逐根 1m K 线滚动验证。")
     print(f"[严格回测] 回测天数：{backtest_days} 天")
     print(f"[严格回测] 需要分钟数：{backtest_minutes}")
     print(f"[严格回测] 步长：{step_minutes} 分钟")
@@ -244,7 +257,7 @@ def main():
         "--step-minutes",
         type=int,
         default=None,
-        help="严格回测预测步长，最小 1；例如 1、3、5。",
+        help="兼容参数。严格回测已固定为每 1 分钟逐点验证，传入其他值会被忽略。",
     )
 
     parser.add_argument(
