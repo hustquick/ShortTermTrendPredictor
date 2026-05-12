@@ -76,7 +76,7 @@ PREDICT_HORIZON_MINUTES = 10
 PREDICT_HORIZON_MS = PREDICT_HORIZON_MINUTES * INTERVAL_MS
 
 USE_LABEL_NEUTRAL_ZONE = True
-LABEL_NEUTRAL_THRESHOLD = 0.0003
+LABEL_NEUTRAL_THRESHOLD = 0.0002
 
 # =========================
 # 信号阈值配置
@@ -179,11 +179,30 @@ STRICT_PARAM_RECOMMEND_MIN_SIDE_SIGNALS = 50
 
 DUAL_MODEL_TUNE_DAYS = 30
 DUAL_MODEL_TUNE_VALID_RATIO = 0.30
-DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 12
-DUAL_MODEL_TUNE_MIN_VALID_SIGNALS = 10
-DUAL_MODEL_TUNE_MIN_WIN_RATE = 0.50
+DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 20
+DUAL_MODEL_TUNE_MIN_VALID_SIGNALS = 30
+DUAL_MODEL_TUNE_MIN_WIN_RATE = 0.52
+DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS = [
+    0.55,
+    0.60,
+    0.65,
+    0.70,
+    0.75,
+    0.80,
+]
 
 DUAL_MODEL_PARAM_GRID = [
+    {
+        "n_estimators": 120,
+        "learning_rate": 0.06,
+        "max_depth": 3,
+        "num_leaves": 7,
+        "min_child_samples": 120,
+        "subsample": 0.75,
+        "colsample_bytree": 0.75,
+        "reg_alpha": 0.30,
+        "reg_lambda": 3.00,
+    },
     {
         "n_estimators": 160,
         "learning_rate": 0.05,
@@ -227,6 +246,17 @@ DUAL_MODEL_PARAM_GRID = [
         "colsample_bytree": 0.95,
         "reg_alpha": 0.05,
         "reg_lambda": 0.50,
+    },
+    {
+        "n_estimators": 650,
+        "learning_rate": 0.025,
+        "max_depth": 7,
+        "num_leaves": 63,
+        "min_child_samples": 15,
+        "subsample": 0.95,
+        "colsample_bytree": 0.95,
+        "reg_alpha": 0.02,
+        "reg_lambda": 0.25,
     },
     {
         "n_estimators": 800,
