@@ -11,6 +11,7 @@ from config import (
     DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE,
     DUAL_MODEL_TUNE_MIN_VALID_SIGNALS,
     DUAL_MODEL_TUNE_MIN_WIN_RATE,
+    DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS,
     DUAL_MODEL_TUNE_VALID_RATIO,
     DUAL_MODEL_TUNING_REPORT_CSV,
     LABEL_NEUTRAL_THRESHOLD,
@@ -50,32 +51,43 @@ def _evaluate_side(
 ) -> dict:
     """
     训练并评估单个方向子模型。
+
+    同一组模型参数下，不再固定使用 0.80 作为信号阈值，
+    而是在 DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS 中搜索更合适的概率阈值。
     """
     models = _fit_ensemble(X_train, y_train, mode="validation", params=params)
     probability = _ensemble_predict_proba(models, X_valid)
-
-    # 对方向模型而言，只有概率足够高才视为该方向有效信号。
-    signal_mask = probability >= 0.80
-    signals = int(signal_mask.sum())
     total = len(X_valid)
 
-    if signals > 0:
-        win_rate = float(y_valid[signal_mask].mean())
-    else:
-        win_rate = None
+    best = None
 
-    signal_ratio = float(signals / total) if total else 0.0
-    score = _score_candidate(win_rate, signals, signal_ratio)
+    for threshold in DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS:
+        signal_mask = probability >= threshold
+        signals = int(signal_mask.sum())
 
-    return {
-        "side": side,
-        "signals": signals,
-        "total": total,
-        "signal_ratio": signal_ratio,
-        "win_rate": win_rate,
-        "score": score,
-        "params": params,
-    }
+        if signals > 0:
+            win_rate = float(y_valid[signal_mask].mean())
+        else:
+            win_rate = None
+
+        signal_ratio = float(signals / total) if total else 0.0
+        score = _score_candidate(win_rate, signals, signal_ratio)
+
+        row = {
+            "side": side,
+            "threshold": float(threshold),
+            "signals": signals,
+            "total": total,
+            "signal_ratio": signal_ratio,
+            "win_rate": win_rate,
+            "score": score,
+            "params": params,
+        }
+
+        if best is None or row["score"] > best["score"]:
+            best = row
+
+    return best
 
 
 def _tune_one_side(
@@ -107,7 +119,8 @@ def _tune_one_side(
         result["trial_no"] = trial_no
         rows.append(result)
         print(
-            f"  signals={result['signals']}, "
+            f"  threshold={result['threshold']}, "
+            f"signals={result['signals']}, "
             f"signal_ratio={result['signal_ratio']}, "
             f"win_rate={result['win_rate']}, "
             f"score={result['score']}"
@@ -173,6 +186,7 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
         flat = {
             "side": row["side"],
             "trial_no": row["trial_no"],
+            "threshold": row["threshold"],
             "signals": row["signals"],
             "total": row["total"],
             "signal_ratio": row["signal_ratio"],
@@ -191,19 +205,27 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
         "valid_ratio": DUAL_MODEL_TUNE_VALID_RATIO,
         "train_samples": len(X_train),
         "valid_samples": len(X_valid),
-        "up": best_up["params"],
-        "down": best_down["params"],
+        "up": {
+            **best_up["params"],
+            "signal_threshold": best_up["threshold"],
+        },
+        "down": {
+            **best_down["params"],
+            "signal_threshold": best_down["threshold"],
+        },
         "up_metric": {
             "signals": best_up["signals"],
             "signal_ratio": best_up["signal_ratio"],
             "win_rate": best_up["win_rate"],
             "score": best_up["score"],
+            "threshold": best_up["threshold"],
         },
         "down_metric": {
             "signals": best_down["signals"],
             "signal_ratio": best_down["signal_ratio"],
             "win_rate": best_down["win_rate"],
             "score": best_down["score"],
+            "threshold": best_down["threshold"],
         },
         "random_state": RANDOM_STATE,
     }
