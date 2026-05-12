@@ -25,6 +25,22 @@ def actual_direction(current_price: float, future_price: float) -> str:
     return "up" if future_price > current_price else "down"
 
 
+def raw_probability_direction(p_up: float) -> str:
+    """
+    只根据概率阈值生成原始方向信号。
+
+    该信号不经过稳定性过滤、regime 过滤和质量门控，主要用于严格回测后分析
+    “模型原始概率是否具有可交易方向性”。正式信号仍然使用 predicted_direction。
+    """
+    if p_up >= LONG_SIGNAL_THRESHOLD:
+        return "up"
+
+    if p_up <= SHORT_SIGNAL_THRESHOLD:
+        return "down"
+
+    return "no_trade"
+
+
 def high_confidence_report(result_df: pd.DataFrame) -> dict:
     """
     只统计真正发出 up/down 信号的样本。
@@ -71,6 +87,52 @@ def high_confidence_report(result_df: pd.DataFrame) -> dict:
 
     if not short_df.empty:
         base["short_win_rate"] = float(short_df["is_correct"].mean())
+
+    return base
+
+
+def raw_signal_report(result_df: pd.DataFrame) -> dict:
+    """
+    统计只使用概率阈值时的原始信号表现。
+    """
+    base = {
+        "total_rows": 0,
+        "raw_valid_signals": 0,
+        "raw_valid_signal_ratio": None,
+        "raw_win_rate": None,
+        "raw_long_signals": 0,
+        "raw_long_win_rate": None,
+        "raw_short_signals": 0,
+        "raw_short_win_rate": None,
+        "raw_no_trade_rows": 0,
+    }
+
+    if result_df.empty or "raw_predicted_direction" not in result_df.columns:
+        return base
+
+    base["total_rows"] = len(result_df)
+    signal_df = result_df[result_df["raw_predicted_direction"].isin(["up", "down"])].copy()
+    base["raw_valid_signals"] = len(signal_df)
+    base["raw_no_trade_rows"] = len(result_df) - len(signal_df)
+
+    if signal_df.empty:
+        base["raw_valid_signal_ratio"] = 0.0
+        return base
+
+    base["raw_valid_signal_ratio"] = float(len(signal_df) / len(result_df))
+    base["raw_win_rate"] = float(signal_df["raw_is_correct"].mean())
+
+    long_df = signal_df[signal_df["raw_predicted_direction"] == "up"].copy()
+    short_df = signal_df[signal_df["raw_predicted_direction"] == "down"].copy()
+
+    base["raw_long_signals"] = len(long_df)
+    base["raw_short_signals"] = len(short_df)
+
+    if not long_df.empty:
+        base["raw_long_win_rate"] = float(long_df["raw_is_correct"].mean())
+
+    if not short_df.empty:
+        base["raw_short_win_rate"] = float(short_df["raw_is_correct"].mean())
 
     return base
 
@@ -317,11 +379,17 @@ def strict_walk_forward_backtest(
 
             pred_dir = pred["predicted_direction"]
             act_dir = actual_direction(current_price, future_price)
+            raw_pred_dir = raw_probability_direction(float(pred["up_probability"]))
 
             if pred_dir == "no_trade":
                 correct = False
             else:
                 correct = pred_dir == act_dir
+
+            if raw_pred_dir == "no_trade":
+                raw_correct = False
+            else:
+                raw_correct = raw_pred_dir == act_dir
 
             row = {
                 "timestamp": ms_to_beijing_time(int(current_row["timestamp"])),
@@ -330,10 +398,12 @@ def strict_walk_forward_backtest(
                 "future_return": future_return,
                 "predicted_direction": pred_dir,
                 "actual_direction": act_dir,
+                "raw_predicted_direction": raw_pred_dir,
                 "up_probability": pred["up_probability"],
                 "confidence": pred["confidence"],
                 "is_valid_signal": pred["is_valid_signal"],
                 "is_correct": correct,
+                "raw_is_correct": raw_correct,
                 "model_trained_at": model_trained_at_time,
             }
 
@@ -342,6 +412,7 @@ def strict_walk_forward_backtest(
             print(
                 f"[严格回测] 完成："
                 f"p_up={pred['up_probability']:.4f}, "
+                f"raw_signal={raw_pred_dir}, "
                 f"signal={pred_dir}, "
                 f"actual={act_dir}, "
                 f"future_return={future_return:.6f}, "
@@ -358,6 +429,7 @@ def strict_walk_forward_backtest(
             elapsed = time.time() - started
             result_df = pd.DataFrame(results)
             report = high_confidence_report(result_df)
+            raw_report = raw_signal_report(result_df)
 
             print("[严格回测] 当前进度报告：")
             print(f"  已完成: {step_no}/{total_steps}")
@@ -372,11 +444,22 @@ def strict_walk_forward_backtest(
             print(f"  做多胜率: {report['long_win_rate']}")
             print(f"  做空信号数: {report['short_signals']}")
             print(f"  做空胜率: {report['short_win_rate']}")
+            print("[严格回测] 原始概率信号进度报告：")
+            print(f"  原始有效信号数: {raw_report['raw_valid_signals']}")
+            print(f"  原始 no_trade 数: {raw_report['raw_no_trade_rows']}")
+            print(f"  原始有效信号占比: {raw_report['raw_valid_signal_ratio']}")
+            print(f"  原始有效信号胜率: {raw_report['raw_win_rate']}")
+            print(f"  原始做多信号数: {raw_report['raw_long_signals']}")
+            print(f"  原始做多胜率: {raw_report['raw_long_win_rate']}")
+            print(f"  原始做空信号数: {raw_report['raw_short_signals']}")
+            print(f"  原始做空胜率: {raw_report['raw_short_win_rate']}")
 
     result_df = pd.DataFrame(results)
 
     print("[严格回测] 全部完成。")
     print(high_confidence_report(result_df))
+    print("[严格回测] 原始概率信号汇总。")
+    print(raw_signal_report(result_df))
 
     return result_df
 
