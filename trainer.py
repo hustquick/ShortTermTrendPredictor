@@ -11,6 +11,7 @@ from config import (
     CAT_WEIGHT,
     DUAL_DIRECTION_MIN_EDGE,
     DUAL_MODEL_PARAMS_FILE,
+    ENABLE_HIGH_WIN_RATE_FILTER,
     ENABLE_LONG_SIGNALS,
     ENABLE_LONG_REGIME_FILTER,
     ENABLE_SHORT_REGIME_FILTER,
@@ -55,12 +56,11 @@ from config import (
     XGB_WEIGHT,
 )
 from features import make_dual_train_dataset, make_train_dataset
+from high_win_rate_filter import passes_high_win_rate_filter
 
 
 class ProbabilityStabilityFilter:
-    """
-    按最近概率序列过滤高置信信号。
-    """
+    """按最近概率序列过滤高置信信号。"""
 
     def __init__(self):
         max_window = max(LONG_STABILITY_WINDOW, SHORT_STABILITY_WINDOW)
@@ -106,34 +106,22 @@ class ProbabilityStabilityFilter:
 def make_time_decay_weights(n: int) -> np.ndarray:
     if n <= 0:
         return np.array([])
-
     x = np.linspace(0, 1, n)
     weights = np.exp(TIME_DECAY_STRENGTH * x)
     return weights / weights.mean()
 
 
 def load_tuned_dual_params(path=DUAL_MODEL_PARAMS_FILE) -> dict:
-    """
-    读取双子模型自动调参结果。
-
-    文件不存在时返回空字典，训练器会使用默认参数。
-    """
     if not path.exists():
         return {}
-
     with open(path, "r", encoding="utf-8") as f:
         params = json.load(f)
-
-    if not isinstance(params, dict):
-        return {}
-
-    return params
+    return params if isinstance(params, dict) else {}
 
 
 def _validate_binary_target(y: pd.Series, name: str, min_positive: int = 20):
     if y.nunique() < 2:
         raise ValueError(f"{name} 只有一个类别，无法训练方向子模型。")
-
     positive_count = int((y == 1).sum())
     if positive_count < min_positive:
         raise ValueError(f"{name} 正样本过少：{positive_count}，至少需要 {min_positive} 条。")
@@ -141,11 +129,9 @@ def _validate_binary_target(y: pd.Series, name: str, min_positive: int = 20):
 
 def _ensemble_predict_proba(models: tuple, X: pd.DataFrame) -> np.ndarray:
     lgb_model, xgb_model, cat_model = models
-
     p_lgb = lgb_model.predict_proba(X)[:, 1]
     p_xgb = xgb_model.predict_proba(X)[:, 1]
     p_cat = cat_model.predict_proba(X)[:, 1]
-
     probability = LGB_WEIGHT * p_lgb + XGB_WEIGHT * p_xgb + CAT_WEIGHT * p_cat
     return np.clip(probability, 0.0, 1.0)
 
@@ -163,7 +149,6 @@ def _default_params(mode: str) -> dict:
             "reg_alpha": 0.0,
             "reg_lambda": 0.0,
         }
-
     return {
         "n_estimators": 220,
         "learning_rate": 0.04,
@@ -179,23 +164,14 @@ def _default_params(mode: str) -> dict:
 
 def _resolve_params(mode: str, side: str, override_params: dict | None = None) -> dict:
     params = _default_params(mode)
-
-    tuned_params = override_params
-    if tuned_params is None:
-        tuned_params = load_tuned_dual_params()
-
+    tuned_params = override_params if override_params is not None else load_tuned_dual_params()
     side_params = tuned_params.get(side, {}) if isinstance(tuned_params, dict) else {}
     if side_params:
         params.update(side_params)
-
     return params
 
 
 class SingleDirectionModel:
-    """
-    单一方向兼容模型。
-    """
-
     def __init__(self, lgb_model, xgb_model, cat_model, feature_cols):
         self.lgb_model = lgb_model
         self.xgb_model = xgb_model
@@ -217,14 +193,12 @@ class SingleDirectionModel:
     def _passes_signal_quality_gate(self, X: pd.DataFrame, direction: str) -> bool:
         if not ENABLE_SIGNAL_QUALITY_GATE:
             return True
-
         row = X.iloc[0]
         trend_agreement = self._feature_value(row, "trend_agreement")
         ret_5 = self._feature_value(row, "ret_5")
         ret_10 = self._feature_value(row, "ret_10")
         ema_5_20_diff = self._feature_value(row, "ema_5_20_diff")
         macd_hist = self._feature_value(row, "macd_hist")
-
         if direction == "up":
             return (
                 trend_agreement >= SIGNAL_MIN_TREND_AGREEMENT
@@ -233,7 +207,6 @@ class SingleDirectionModel:
                 and ema_5_20_diff > 0
                 and macd_hist > 0
             )
-
         if direction == "down":
             return (
                 trend_agreement <= -SIGNAL_MIN_TREND_AGREEMENT
@@ -242,77 +215,47 @@ class SingleDirectionModel:
                 and ema_5_20_diff < 0
                 and macd_hist < 0
             )
-
         return False
 
     def _passes_long_regime_filter(self, X: pd.DataFrame) -> bool:
         if not ENABLE_LONG_REGIME_FILTER:
             return True
-
         row = X.iloc[0]
-
-        if LONG_REGIME_REQUIRE_EMA_20_60_POSITIVE:
-            if self._feature_value(row, "ema_20_60_diff") <= 0:
-                return False
-
-        if LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE:
-            if self._feature_value(row, "macd_hist") <= 0:
-                return False
-
-        if LONG_REGIME_MAX_RET_5 is not None:
-            if self._feature_value(row, "ret_5") >= LONG_REGIME_MAX_RET_5:
-                return False
-
-        if LONG_REGIME_MIN_CLOSE_POSITION is not None:
-            if self._feature_value(row, "close_position") <= LONG_REGIME_MIN_CLOSE_POSITION:
-                return False
-
-        if LONG_REGIME_MIN_RET_30 is not None:
-            if self._feature_value(row, "ret_30") <= LONG_REGIME_MIN_RET_30:
-                return False
-
-        if LONG_REGIME_MAX_RSI_14 is not None:
-            if self._feature_value(row, "rsi_14") >= LONG_REGIME_MAX_RSI_14:
-                return False
-
+        if LONG_REGIME_REQUIRE_EMA_20_60_POSITIVE and self._feature_value(row, "ema_20_60_diff") <= 0:
+            return False
+        if LONG_REGIME_REQUIRE_MACD_HIST_POSITIVE and self._feature_value(row, "macd_hist") <= 0:
+            return False
+        if LONG_REGIME_MAX_RET_5 is not None and self._feature_value(row, "ret_5") >= LONG_REGIME_MAX_RET_5:
+            return False
+        if LONG_REGIME_MIN_CLOSE_POSITION is not None and self._feature_value(row, "close_position") <= LONG_REGIME_MIN_CLOSE_POSITION:
+            return False
+        if LONG_REGIME_MIN_RET_30 is not None and self._feature_value(row, "ret_30") <= LONG_REGIME_MIN_RET_30:
+            return False
+        if LONG_REGIME_MAX_RSI_14 is not None and self._feature_value(row, "rsi_14") >= LONG_REGIME_MAX_RSI_14:
+            return False
         if LONG_REGIME_SKIP_FULL_HIGH_BODY:
             body_ratio = self._feature_value(row, "body_ratio")
             close_position = self._feature_value(row, "close_position")
             if body_ratio > LONG_REGIME_FULL_HIGH_MIN_BODY_RATIO and close_position > LONG_REGIME_FULL_HIGH_MIN_CLOSE_POSITION:
                 return False
-
         return True
 
     def _passes_short_regime_filter(self, X: pd.DataFrame) -> bool:
         if not ENABLE_SHORT_REGIME_FILTER:
             return True
-
         row = X.iloc[0]
-
-        if SHORT_REGIME_MIN_CLOSE_POSITION is not None:
-            if self._feature_value(row, "close_position") <= SHORT_REGIME_MIN_CLOSE_POSITION:
-                return False
-
-        if SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE:
-            if self._feature_value(row, "macd_hist") >= 0:
-                return False
-
-        if SHORT_REGIME_MIN_RET_30 is not None:
-            if self._feature_value(row, "ret_30") <= SHORT_REGIME_MIN_RET_30:
-                return False
-
-        if SHORT_REGIME_MAX_RET_30 is not None:
-            if self._feature_value(row, "ret_30") >= SHORT_REGIME_MAX_RET_30:
-                return False
-
-        if SHORT_REGIME_MIN_RET_10 is not None:
-            if self._feature_value(row, "ret_10") <= SHORT_REGIME_MIN_RET_10:
-                return False
-
-        if SHORT_REGIME_MAX_RSI_14 is not None:
-            if self._feature_value(row, "rsi_14") >= SHORT_REGIME_MAX_RSI_14:
-                return False
-
+        if SHORT_REGIME_MIN_CLOSE_POSITION is not None and self._feature_value(row, "close_position") <= SHORT_REGIME_MIN_CLOSE_POSITION:
+            return False
+        if SHORT_REGIME_REQUIRE_MACD_HIST_NEGATIVE and self._feature_value(row, "macd_hist") >= 0:
+            return False
+        if SHORT_REGIME_MIN_RET_30 is not None and self._feature_value(row, "ret_30") <= SHORT_REGIME_MIN_RET_30:
+            return False
+        if SHORT_REGIME_MAX_RET_30 is not None and self._feature_value(row, "ret_30") >= SHORT_REGIME_MAX_RET_30:
+            return False
+        if SHORT_REGIME_MIN_RET_10 is not None and self._feature_value(row, "ret_10") <= SHORT_REGIME_MIN_RET_10:
+            return False
+        if SHORT_REGIME_MAX_RSI_14 is not None and self._feature_value(row, "rsi_14") >= SHORT_REGIME_MAX_RSI_14:
+            return False
         if SHORT_REGIME_SKIP_AGGRESSIVE_BUY_CANDLE:
             taker_buy_ratio = self._feature_value(row, "taker_buy_ratio")
             body_ratio = self._feature_value(row, "body_ratio")
@@ -323,21 +266,15 @@ class SingleDirectionModel:
                 and trend_agreement > SHORT_REGIME_AGGRESSIVE_BUY_MIN_TREND
             ):
                 return False
-
         if SHORT_REGIME_SKIP_WEAK_MIXED_BULLISH_TREND:
             trend_agreement = self._feature_value(row, "trend_agreement")
             rsi_6 = self._feature_value(row, "rsi_6")
             if 0 < trend_agreement < 1 and rsi_6 < SHORT_REGIME_WEAK_TREND_MAX_RSI_6:
                 return False
-
         return True
 
 
 class DualDirectionModel(SingleDirectionModel):
-    """
-    双方向子模型：up 与 down 各自拥有独立模型集合。
-    """
-
     def __init__(self, up_models: tuple, down_models: tuple, feature_cols):
         self.up_models = up_models
         self.down_models = down_models
@@ -345,13 +282,11 @@ class DualDirectionModel(SingleDirectionModel):
 
     def predict_direction_scores(self, X: pd.DataFrame) -> tuple[float, float, float, float]:
         X = X[self.feature_cols]
-
         p_up_signal = float(_ensemble_predict_proba(self.up_models, X)[0])
         p_down_signal = float(_ensemble_predict_proba(self.down_models, X)[0])
         direction_edge = p_up_signal - p_down_signal
         score_sum = p_up_signal + p_down_signal
         p_up_relative = 0.5 if score_sum <= 1e-12 else p_up_signal / score_sum
-
         return p_up_signal, p_down_signal, p_up_relative, direction_edge
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -364,16 +299,16 @@ class DualDirectionModel(SingleDirectionModel):
         if signal_filter is not None:
             signal_filter.update(p_up_relative)
 
+        high_win_rate_signal = False
+
         if p_up_signal >= LONG_SIGNAL_THRESHOLD and direction_edge >= DUAL_DIRECTION_MIN_EDGE:
             signal = "up"
             confidence = p_up_signal
             is_valid_signal = ENABLE_LONG_SIGNALS and self._passes_signal_quality_gate(X, signal)
-
         elif p_down_signal >= 1.0 - SHORT_SIGNAL_THRESHOLD and direction_edge <= -DUAL_DIRECTION_MIN_EDGE:
             signal = "down"
             confidence = p_down_signal
             is_valid_signal = ENABLE_SHORT_SIGNALS and self._passes_signal_quality_gate(X, signal)
-
         else:
             signal = "no_trade"
             confidence = max(p_up_signal, p_down_signal)
@@ -384,9 +319,20 @@ class DualDirectionModel(SingleDirectionModel):
 
         if signal == "up" and is_valid_signal:
             is_valid_signal = self._passes_long_regime_filter(X)
-
         if signal == "down" and is_valid_signal:
             is_valid_signal = self._passes_short_regime_filter(X)
+
+        if signal in {"up", "down"} and is_valid_signal and ENABLE_HIGH_WIN_RATE_FILTER:
+            high_win_rate_signal = passes_high_win_rate_filter(
+                X=X,
+                direction=signal,
+                up_signal_probability=p_up_signal,
+                down_signal_probability=p_down_signal,
+                direction_edge=direction_edge,
+            )
+            is_valid_signal = high_win_rate_signal
+        elif signal in {"up", "down"} and is_valid_signal:
+            high_win_rate_signal = True
 
         if signal in {"up", "down"} and is_valid_signal and signal_filter is not None:
             signal_filter.register_signal()
@@ -401,13 +347,13 @@ class DualDirectionModel(SingleDirectionModel):
             "down_signal_probability": p_down_signal,
             "direction_edge": direction_edge,
             "confidence": confidence,
+            "high_win_rate_signal": bool(high_win_rate_signal),
             "is_valid_signal": bool(is_valid_signal),
         }
 
 
 def _make_lgb_model(mode: str, params: dict | None = None):
     import lightgbm as lgb
-
     p = _default_params(mode) if params is None else params
     return lgb.LGBMClassifier(
         objective="binary",
@@ -428,7 +374,6 @@ def _make_lgb_model(mode: str, params: dict | None = None):
 
 def _make_xgb_model(mode: str, params: dict | None = None):
     import xgboost as xgb
-
     p = _default_params(mode) if params is None else params
     return xgb.XGBClassifier(
         objective="binary:logistic",
@@ -449,7 +394,6 @@ def _make_xgb_model(mode: str, params: dict | None = None):
 
 def _make_cat_model(mode: str, params: dict | None = None):
     from catboost import CatBoostClassifier
-
     p = _default_params(mode) if params is None else params
     return CatBoostClassifier(
         iterations=int(p["n_estimators"]),
@@ -466,15 +410,12 @@ def _make_cat_model(mode: str, params: dict | None = None):
 
 def _fit_ensemble(X: pd.DataFrame, y: pd.Series, mode: str, params: dict | None = None):
     weights = make_time_decay_weights(len(X))
-
     lgb_model = _make_lgb_model(mode, params=params)
     xgb_model = _make_xgb_model(mode, params=params)
     cat_model = _make_cat_model(mode, params=params)
-
     lgb_model.fit(X, y, sample_weight=weights)
     xgb_model.fit(X, y, sample_weight=weights)
     cat_model.fit(X, y, sample_weight=weights)
-
     return lgb_model, xgb_model, cat_model
 
 
@@ -488,14 +429,11 @@ def train_single_direction_model(df: pd.DataFrame, mode: str = "validation") -> 
 
     X, y, data, feature_cols = make_train_dataset(df)
     min_samples = 250 if mode == "validation" else 200
-
     if len(X) < min_samples:
         raise ValueError(f"训练样本过少：{len(X)}，至少需要 {min_samples} 条有效样本。")
-
     _validate_binary_target(y, "label")
     params = _resolve_params(mode, "up")
     lgb_model, xgb_model, cat_model = _fit_ensemble(X, y, mode, params=params)
-
     return SingleDirectionModel(lgb_model, xgb_model, cat_model, feature_cols)
 
 
@@ -513,19 +451,14 @@ def train_dual_direction_model(
 
     X, y_up, y_down, data, feature_cols = make_dual_train_dataset(df)
     min_samples = 250 if mode == "validation" else 200
-
     if len(X) < min_samples:
         raise ValueError(f"训练样本过少：{len(X)}，至少需要 {min_samples} 条有效样本。")
-
     _validate_binary_target(y_up, "up_label")
     _validate_binary_target(y_down, "down_label")
-
     up_params = _resolve_params(mode, "up", override_params=params_by_side)
     down_params = _resolve_params(mode, "down", override_params=params_by_side)
-
     up_models = _fit_ensemble(X, y_up, mode, params=up_params)
     down_models = _fit_ensemble(X, y_down, mode, params=down_params)
-
     return DualDirectionModel(up_models, down_models, feature_cols)
 
 
@@ -545,7 +478,6 @@ def save_model(model: SingleDirectionModel, path=MODEL_FILE):
 def load_model(path=MODEL_FILE):
     if not path.exists():
         return None
-
     with open(path, "rb") as f:
         return pickle.load(f)
 
