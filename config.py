@@ -177,9 +177,9 @@ STRICT_PARAM_RECOMMEND_MIN_SIDE_SIGNALS = 50
 # 双子模型自动调参配置
 # =========================
 
-DUAL_MODEL_TUNE_DAYS = 30
+DUAL_MODEL_TUNE_DAYS = 60
 DUAL_MODEL_TUNE_VALID_RATIO = 0.30
-DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 20
+DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 30
 DUAL_MODEL_TUNE_MIN_VALID_SIGNALS = 30
 DUAL_MODEL_TUNE_MIN_WIN_RATE = 0.52
 DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS = [
@@ -268,6 +268,50 @@ DUAL_MODEL_PARAM_GRID = [
         "colsample_bytree": 1.00,
         "reg_alpha": 0.00,
         "reg_lambda": 0.00,
+    },
+    {
+        "n_estimators": 200,
+        "learning_rate": 0.06,
+        "max_depth": 4,
+        "num_leaves": 20,
+        "min_child_samples": 50,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "reg_alpha": 0.10,
+        "reg_lambda": 0.80,
+    },
+    {
+        "n_estimators": 350,
+        "learning_rate": 0.04,
+        "max_depth": 5,
+        "num_leaves": 40,
+        "min_child_samples": 30,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "reg_alpha": 0.08,
+        "reg_lambda": 0.80,
+    },
+    {
+        "n_estimators": 500,
+        "learning_rate": 0.02,
+        "max_depth": 6,
+        "num_leaves": 60,
+        "min_child_samples": 20,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "reg_alpha": 0.05,
+        "reg_lambda": 0.50,
+    },
+    {
+        "n_estimators": 700,
+        "learning_rate": 0.015,
+        "max_depth": 8,
+        "num_leaves": 80,
+        "min_child_samples": 10,
+        "subsample": 0.95,
+        "colsample_bytree": 0.95,
+        "reg_alpha": 0.05,
+        "reg_lambda": 0.25,
     },
 ]
 
