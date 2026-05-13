@@ -29,16 +29,76 @@ def _score_candidate(win_rate: float | None, signals: int, signal_ratio: float) 
     """
     调参综合评分。
 
-    优先提高胜率，同时要求有足够信号数。该评分只用于参数选择，
-    不代表真实收益率。
+    评分目标不是寻找极小样本下的偶然高胜率，而是在样本量足够的前提下
+    兼顾胜率、信号占比和样本规模。
     """
     if win_rate is None or signals <= 0:
         return -1.0
 
+    min_signals = max(DUAL_MODEL_TUNE_MIN_VALID_SIGNALS, 1)
+
+    if signals < min_signals:
+        sample_ratio = signals / min_signals
+        return float(-1.0 + 0.1 * sample_ratio)
+
     signal_bonus = min(signal_ratio, 0.5) * 0.05
-    sample_bonus = min(signals / max(DUAL_MODEL_TUNE_MIN_VALID_SIGNALS, 1), 2.0) * 0.01
+    sample_bonus = min(signals / min_signals, 3.0) * 0.01
 
     return float(win_rate + signal_bonus + sample_bonus)
+
+
+def _select_best_candidate(rows: list[dict]) -> dict:
+    """
+    选择最佳参数组合。
+
+    优先顺序：
+    1. 信号数达标且胜率达标的组合；
+    2. 信号数达标但胜率未达标的组合；
+    3. 所有组合中样本数相对更多、评分最高的组合。
+
+    这样可以避免 signals 很少但 win_rate 偶然很高的组合被选为最优。
+    """
+    signal_enough = [
+        row for row in rows
+        if row["signals"] >= DUAL_MODEL_TUNE_MIN_VALID_SIGNALS
+        and row["win_rate"] is not None
+    ]
+
+    qualified = [
+        row for row in signal_enough
+        if row["win_rate"] >= DUAL_MODEL_TUNE_MIN_WIN_RATE
+    ]
+
+    if qualified:
+        return max(
+            qualified,
+            key=lambda row: (
+                row["score"],
+                row["win_rate"],
+                row["signals"],
+                row["signal_ratio"],
+            ),
+        )
+
+    if signal_enough:
+        return max(
+            signal_enough,
+            key=lambda row: (
+                row["score"],
+                row["win_rate"],
+                row["signals"],
+                row["signal_ratio"],
+            ),
+        )
+
+    return max(
+        rows,
+        key=lambda row: (
+            row["score"],
+            row["signals"],
+            row["signal_ratio"],
+        ),
+    )
 
 
 def _evaluate_side(
@@ -59,7 +119,7 @@ def _evaluate_side(
     probability = _ensemble_predict_proba(models, X_valid)
     total = len(X_valid)
 
-    best = None
+    threshold_rows = []
 
     for threshold in DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS:
         signal_mask = probability >= threshold
@@ -73,21 +133,20 @@ def _evaluate_side(
         signal_ratio = float(signals / total) if total else 0.0
         score = _score_candidate(win_rate, signals, signal_ratio)
 
-        row = {
-            "side": side,
-            "threshold": float(threshold),
-            "signals": signals,
-            "total": total,
-            "signal_ratio": signal_ratio,
-            "win_rate": win_rate,
-            "score": score,
-            "params": params,
-        }
+        threshold_rows.append(
+            {
+                "side": side,
+                "threshold": float(threshold),
+                "signals": signals,
+                "total": total,
+                "signal_ratio": signal_ratio,
+                "win_rate": win_rate,
+                "score": score,
+                "params": params,
+            }
+        )
 
-        if best is None or row["score"] > best["score"]:
-            best = row
-
-    return best
+    return _select_best_candidate(threshold_rows)
 
 
 def _tune_one_side(
@@ -126,15 +185,7 @@ def _tune_one_side(
             f"score={result['score']}"
         )
 
-    qualified = [
-        row for row in rows
-        if row["signals"] >= DUAL_MODEL_TUNE_MIN_VALID_SIGNALS
-        and row["win_rate"] is not None
-        and row["win_rate"] >= DUAL_MODEL_TUNE_MIN_WIN_RATE
-    ]
-
-    pool = qualified if qualified else rows
-    best = max(pool, key=lambda row: row["score"])
+    best = _select_best_candidate(rows)
 
     return best, rows
 
@@ -192,6 +243,11 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
             "signal_ratio": row["signal_ratio"],
             "win_rate": row["win_rate"],
             "score": row["score"],
+            "signal_enough": row["signals"] >= DUAL_MODEL_TUNE_MIN_VALID_SIGNALS,
+            "win_rate_enough": (
+                row["win_rate"] is not None
+                and row["win_rate"] >= DUAL_MODEL_TUNE_MIN_WIN_RATE
+            ),
         }
         flat.update({f"param_{key}": value for key, value in row["params"].items()})
         report_rows.append(flat)
@@ -203,6 +259,8 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "label_neutral_threshold": LABEL_NEUTRAL_THRESHOLD,
         "valid_ratio": DUAL_MODEL_TUNE_VALID_RATIO,
+        "min_valid_signals": DUAL_MODEL_TUNE_MIN_VALID_SIGNALS,
+        "min_win_rate": DUAL_MODEL_TUNE_MIN_WIN_RATE,
         "train_samples": len(X_train),
         "valid_samples": len(X_valid),
         "up": {
@@ -219,6 +277,11 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
             "win_rate": best_up["win_rate"],
             "score": best_up["score"],
             "threshold": best_up["threshold"],
+            "signal_enough": best_up["signals"] >= DUAL_MODEL_TUNE_MIN_VALID_SIGNALS,
+            "win_rate_enough": (
+                best_up["win_rate"] is not None
+                and best_up["win_rate"] >= DUAL_MODEL_TUNE_MIN_WIN_RATE
+            ),
         },
         "down_metric": {
             "signals": best_down["signals"],
@@ -226,6 +289,11 @@ def tune_dual_model_params(df: pd.DataFrame) -> dict:
             "win_rate": best_down["win_rate"],
             "score": best_down["score"],
             "threshold": best_down["threshold"],
+            "signal_enough": best_down["signals"] >= DUAL_MODEL_TUNE_MIN_VALID_SIGNALS,
+            "win_rate_enough": (
+                best_down["win_rate"] is not None
+                and best_down["win_rate"] >= DUAL_MODEL_TUNE_MIN_WIN_RATE
+            ),
         },
         "random_state": RANDOM_STATE,
     }
