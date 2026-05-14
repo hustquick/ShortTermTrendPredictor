@@ -12,6 +12,7 @@ from historical_match_filter import build_historical_match_rows
 from kronos_adapter import KronosAdapter
 from strategy_notifier import send_prediction_signal, send_validation_signal
 from strategies.rules import (
+    FinStarScenarioStrategy,
     HistoricalMatchLongStrategy,
     HistoricalMatchShortStrategy,
     HistoricalMatchStrategy,
@@ -29,6 +30,7 @@ STRATEGY_MAP = {
     "historical_match_long": HistoricalMatchLongStrategy,
     "historical_match_short": HistoricalMatchShortStrategy,
     "kronos_confirm": KronosConfirmStrategy,
+    "finstar_scenario": FinStarScenarioStrategy,
 }
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
@@ -129,7 +131,6 @@ def _update_latest_prediction(row: dict):
 
 
 def rebuild_latest_predictions_from_log():
-    """Rebuild de-duplicated latest snapshot from append-only strategy_predictions.csv."""
     if not STRATEGY_PREDICTIONS_CSV.exists():
         _save_latest_prediction_rows({})
         return
@@ -337,7 +338,7 @@ def _update_kronos_strategy_context(strategies: list, kronos_result):
 
 
 def run_realtime_strategies(
-    strategy_names: str = "short_momentum,relaxed_scenario,historical_match,kronos_confirm",
+    strategy_names: str = "short_momentum,relaxed_scenario,historical_match,kronos_confirm,finstar_scenario",
     train_minutes: int = 48 * 60,
     once: bool = False,
 ):
