@@ -3,7 +3,6 @@
 import json
 import time
 from datetime import datetime
-from pathlib import Path
 
 from config import DATA_DIR, PREDICT_HORIZON_MINUTES, REALTIME_INTERVAL_SECONDS
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
@@ -69,6 +68,9 @@ def append_validated_signal(row: dict):
         "signal_price",
         "validation_price",
         "confidence",
+        "up_signal_probability",
+        "down_signal_probability",
+        "direction_edge",
     ]
     with open(VALIDATED_STRATEGY_SIGNALS, "a", encoding="utf-8") as f:
         if not exists:
@@ -111,6 +113,9 @@ def validate_due_signals(df, now_ms: int):
             "signal_price": signal_price,
             "validation_price": validation_price,
             "confidence": row["confidence"],
+            "up_signal_probability": row.get("up_signal_probability"),
+            "down_signal_probability": row.get("down_signal_probability"),
+            "direction_edge": row.get("direction_edge"),
         }
         append_validated_signal(validation_row)
         send_validation_signal(
@@ -124,6 +129,9 @@ def validate_due_signals(df, now_ms: int):
             signal_time=row["signal_time"],
             validation_time=validation_time,
             confidence=float(row["confidence"]),
+            up_signal_probability=row.get("up_signal_probability"),
+            down_signal_probability=row.get("down_signal_probability"),
+            direction_edge=row.get("direction_edge"),
         )
         print(
             "[realtime_strategy] validation: "
@@ -191,6 +199,7 @@ def run_realtime_strategies(
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
+    print("[realtime_strategy] supported strategies: short_momentum, relaxed_scenario")
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
 
     model = load_model()
@@ -240,19 +249,22 @@ def run_realtime_strategies(
             signal_time = ms_to_beijing_time(signal_timestamp)
 
             print(
-                "[realtime_strategy] model output: "
+                "[realtime_strategy] dual-model output: "
                 f"time={signal_time}, price={current_price:.2f}, "
-                f"up={prediction.get('up_signal_probability'):.4f}, "
-                f"down={prediction.get('down_signal_probability'):.4f}, "
-                f"edge={prediction.get('direction_edge'):.4f}"
+                f"up_model={prediction.get('up_signal_probability'):.4f}, "
+                f"down_model={prediction.get('down_signal_probability'):.4f}, "
+                f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
             )
 
             for strategy in strategies:
                 decision = strategy.decide(feature_row, prediction)
                 print(
-                    "[realtime_strategy] decision: "
+                    "[realtime_strategy] strategy decision: "
                     f"strategy={strategy.name}, direction={decision.direction}, "
-                    f"confidence={decision.confidence:.4f}, reason={decision.reason}"
+                    f"confidence={decision.confidence:.4f}, reason={decision.reason}, "
+                    f"up_model={prediction.get('up_signal_probability'):.4f}, "
+                    f"down_model={prediction.get('down_signal_probability'):.4f}, "
+                    f"edge={prediction.get('direction_edge'):.4f}"
                 )
                 if decision.direction in {"up", "down"}:
                     register_prediction_signal(
