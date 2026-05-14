@@ -188,12 +188,6 @@ class LongMomentumStrategy:
 
 
 class HistoricalMatchStrategy:
-    """Historical matched-sample confirmation strategy.
-
-    It converts a dual-model directional candidate into a signal only when similar
-    historical samples have enough observations and >=70% directional success.
-    """
-
     name = "historical_match"
 
     def __init__(self, historical_rows: pd.DataFrame | None = None):
@@ -208,7 +202,6 @@ class HistoricalMatchStrategy:
         p_down = float(prediction.get("down_signal_probability", 0.0))
         edge = float(prediction.get("direction_edge", 0.0))
         confidence = max(p_up, p_down)
-
         if edge > 0.15 and p_up > p_down:
             candidate = "up"
         elif edge < -0.15 and p_down > p_up:
@@ -216,13 +209,7 @@ class HistoricalMatchStrategy:
         else:
             self.last_match = None
             return StrategyDecision("no_trade", confidence, "no_directional_candidate")
-
-        result = evaluate_historical_match(
-            historical_rows=self.historical_rows,
-            current_features=features,
-            prediction=prediction,
-            candidate_direction=candidate,
-        )
+        result = evaluate_historical_match(self.historical_rows, features, prediction, candidate)
         self.last_match = result
         success = "None" if result.success_rate is None else f"{result.success_rate:.4f}"
         reason = f"{result.reason};matched={result.matched_signals};success_rate={success}"
@@ -269,6 +256,56 @@ class HistoricalMatchShortStrategy(HistoricalMatchStrategy):
         return StrategyDecision("no_trade", p_down, reason)
 
 
+class KronosConfirmStrategy:
+    """Kronos confirmation strategy.
+
+    The strategy only emits a direction when the dual-model candidate and Kronos
+    forecast direction agree. It is an experimental parallel strategy.
+    """
+
+    name = "kronos_confirm"
+
+    def __init__(self):
+        self.kronos_result = None
+
+    def update_kronos_result(self, kronos_result):
+        self.kronos_result = kronos_result
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        p_up = float(prediction.get("up_signal_probability", 0.0))
+        p_down = float(prediction.get("down_signal_probability", 0.0))
+        edge = float(prediction.get("direction_edge", 0.0))
+        confidence = max(p_up, p_down)
+
+        if self.kronos_result is None:
+            return StrategyDecision("no_trade", confidence, "kronos_not_ready")
+        if not getattr(self.kronos_result, "available", False):
+            return StrategyDecision("no_trade", confidence, getattr(self.kronos_result, "reason", "kronos_unavailable"))
+
+        if edge > 0.15 and p_up > p_down:
+            candidate = "up"
+        elif edge < -0.15 and p_down > p_up:
+            candidate = "down"
+        else:
+            return StrategyDecision("no_trade", confidence, "no_dual_model_candidate")
+
+        kronos_direction = getattr(self.kronos_result, "direction", "no_trade")
+        kronos_confidence = float(getattr(self.kronos_result, "confidence", 0.0))
+        if kronos_direction != candidate:
+            return StrategyDecision(
+                "no_trade",
+                confidence,
+                f"kronos_disagree;kronos={kronos_direction};candidate={candidate};kronos_conf={kronos_confidence:.4f}",
+            )
+
+        combined_confidence = min(1.0, 0.7 * confidence + 0.3 * kronos_confidence)
+        return StrategyDecision(
+            candidate,
+            combined_confidence,
+            f"kronos_confirmed;kronos={kronos_direction};kronos_conf={kronos_confidence:.4f}",
+        )
+
+
 def default_strategies():
     return [
         BaselineDualStrategy(),
@@ -279,6 +316,7 @@ def default_strategies():
         HistoricalMatchStrategy(),
         HistoricalMatchLongStrategy(),
         HistoricalMatchShortStrategy(),
+        KronosConfirmStrategy(),
         HighConfidenceFilterStrategy(),
         ScenarioAwareStrategy(),
     ]
