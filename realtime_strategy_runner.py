@@ -1,10 +1,11 @@
 # realtime_strategy_runner.py
 
+import csv
 import json
 import time
 from datetime import datetime
 
-from config import DATA_DIR, PREDICT_HORIZON_MINUTES, REALTIME_INTERVAL_SECONDS
+from config import DATA_DIR, PREDICT_HORIZON_MINUTES, PREDICTIONS_CSV, REALTIME_INTERVAL_SECONDS
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from features import build_features
 from strategy_notifier import send_prediction_signal, send_validation_signal
@@ -19,6 +20,25 @@ STRATEGY_MAP = {
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
 VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
+STRATEGY_PREDICTIONS_CSV = DATA_DIR / "strategy_predictions.csv"
+
+PREDICTION_COLUMNS = [
+    "prediction_id",
+    "timestamp",
+    "strategy",
+    "current_price",
+    "predicted_direction",
+    "confidence",
+    "reason",
+    "up_signal_probability",
+    "down_signal_probability",
+    "direction_edge",
+    "validation_timestamp",
+    "validation_status",
+    "actual_direction",
+    "future_price",
+    "is_correct",
+]
 
 
 def parse_strategy_names(strategy_names: str):
@@ -54,9 +74,23 @@ def save_pending_signals(rows: list[dict]):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def append_validated_signal(row: dict):
+def _append_csv_row(path, columns: list[str], row: dict):
     DATA_DIR.mkdir(exist_ok=True)
-    exists = VALIDATED_STRATEGY_SIGNALS.exists()
+    exists = path.exists()
+    with open(path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({col: row.get(col, "") for col in columns})
+
+
+def append_prediction_csv(row: dict):
+    """保存策略实时预测。"""
+    _append_csv_row(PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
+    _append_csv_row(STRATEGY_PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
+
+
+def append_validated_signal(row: dict):
     columns = [
         "prediction_id",
         "strategy",
@@ -72,10 +106,7 @@ def append_validated_signal(row: dict):
         "down_signal_probability",
         "direction_edge",
     ]
-    with open(VALIDATED_STRATEGY_SIGNALS, "a", encoding="utf-8") as f:
-        if not exists:
-            f.write(",".join(columns) + "\n")
-        f.write(",".join(str(row.get(col, "")) for col in columns) + "\n")
+    _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
 
 def validate_due_signals(df, now_ms: int):
@@ -118,6 +149,25 @@ def validate_due_signals(df, now_ms: int):
             "direction_edge": row.get("direction_edge"),
         }
         append_validated_signal(validation_row)
+        append_prediction_csv(
+            {
+                "prediction_id": row["prediction_id"],
+                "timestamp": row["signal_time"],
+                "strategy": row["strategy"],
+                "current_price": signal_price,
+                "predicted_direction": predicted_direction,
+                "confidence": row["confidence"],
+                "reason": row.get("reason"),
+                "up_signal_probability": row.get("up_signal_probability"),
+                "down_signal_probability": row.get("down_signal_probability"),
+                "direction_edge": row.get("direction_edge"),
+                "validation_timestamp": validation_time,
+                "validation_status": "validated",
+                "actual_direction": actual_direction,
+                "future_price": validation_price,
+                "is_correct": is_correct,
+            }
+        )
         send_validation_signal(
             strategy_name=row["strategy"],
             prediction_id=row["prediction_id"],
@@ -152,6 +202,7 @@ def register_prediction_signal(
 ):
     prediction_id = f"{strategy_name}-{signal_timestamp}"
     validation_timestamp = signal_timestamp + PREDICT_HORIZON_MINUTES * 60_000
+    validation_time = ms_to_beijing_time(validation_timestamp)
 
     pending = load_pending_signals()
     if any(row.get("prediction_id") == prediction_id for row in pending):
@@ -173,6 +224,26 @@ def register_prediction_signal(
     }
     pending.append(row)
     save_pending_signals(pending)
+
+    append_prediction_csv(
+        {
+            "prediction_id": prediction_id,
+            "timestamp": signal_time,
+            "strategy": strategy_name,
+            "current_price": float(current_price),
+            "predicted_direction": decision.direction,
+            "confidence": float(decision.confidence),
+            "reason": decision.reason,
+            "up_signal_probability": prediction.get("up_signal_probability"),
+            "down_signal_probability": prediction.get("down_signal_probability"),
+            "direction_edge": prediction.get("direction_edge"),
+            "validation_timestamp": validation_time,
+            "validation_status": "pending",
+            "actual_direction": "",
+            "future_price": "",
+            "is_correct": "",
+        }
+    )
 
     send_prediction_signal(
         strategy_name=strategy_name,
@@ -201,6 +272,8 @@ def run_realtime_strategies(
     print(f"[realtime_strategy] strategies={','.join(names)}")
     print("[realtime_strategy] supported strategies: short_momentum, relaxed_scenario")
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
+    print(f"[realtime_strategy] predictions_csv={PREDICTIONS_CSV}")
+    print(f"[realtime_strategy] strategy_predictions_csv={STRATEGY_PREDICTIONS_CSV}")
 
     model = load_model()
     last_train_time = None
