@@ -5,19 +5,22 @@ import argparse
 from realtime_strategy_runner import run_realtime_strategies
 
 
+DEFAULT_STRATEGIES = "short_momentum,relaxed_scenario,historical_match"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run realtime high-confidence strategy signals.")
     parser.add_argument(
         "--strategies",
         type=str,
-        default="short_momentum,relaxed_scenario",
-        help="Comma-separated strategy names. Default: short_momentum,relaxed_scenario",
+        default=DEFAULT_STRATEGIES,
+        help=f"Comma-separated strategy names. Default: {DEFAULT_STRATEGIES}",
     )
     parser.add_argument(
         "--train-minutes",
         type=int,
         default=48 * 60,
-        help="Recent minutes used for model training.",
+        help="Recent minutes used for model training and historical matching.",
     )
     parser.add_argument(
         "--once",
