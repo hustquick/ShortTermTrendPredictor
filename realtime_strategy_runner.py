@@ -9,11 +9,13 @@ from config import DATA_DIR, PREDICT_HORIZON_MINUTES, PREDICTIONS_CSV, REALTIME_
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from features import build_features
 from historical_match_filter import build_historical_match_rows
+from kronos_adapter import KronosAdapter
 from strategy_notifier import send_prediction_signal, send_validation_signal
 from strategies.rules import (
     HistoricalMatchLongStrategy,
     HistoricalMatchShortStrategy,
     HistoricalMatchStrategy,
+    KronosConfirmStrategy,
     RelaxedScenarioStrategy,
     ShortMomentumStrategy,
 )
@@ -26,6 +28,7 @@ STRATEGY_MAP = {
     "historical_match": HistoricalMatchStrategy,
     "historical_match_long": HistoricalMatchLongStrategy,
     "historical_match_short": HistoricalMatchShortStrategy,
+    "kronos_confirm": KronosConfirmStrategy,
 }
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
@@ -275,13 +278,21 @@ def _update_historical_strategy_context(strategies: list, historical_rows):
             strategy.update_history(historical_rows)
 
 
+def _update_kronos_strategy_context(strategies: list, kronos_result):
+    for strategy in strategies:
+        if hasattr(strategy, "update_kronos_result"):
+            strategy.update_kronos_result(kronos_result)
+
+
 def run_realtime_strategies(
-    strategy_names: str = "short_momentum,relaxed_scenario,historical_match",
+    strategy_names: str = "short_momentum,relaxed_scenario,historical_match,kronos_confirm",
     train_minutes: int = 48 * 60,
     once: bool = False,
 ):
     names = parse_strategy_names(strategy_names)
     strategies = [STRATEGY_MAP[name]() for name in names]
+    use_kronos = any(hasattr(strategy, "update_kronos_result") for strategy in strategies)
+    kronos_adapter = KronosAdapter() if use_kronos else None
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
@@ -332,6 +343,16 @@ def run_realtime_strategies(
             if historical_rows is None and any(hasattr(s, "update_history") for s in strategies):
                 historical_rows = _refresh_historical_match_rows(df, feature_df, model)
                 _update_historical_strategy_context(strategies, historical_rows)
+
+            if kronos_adapter is not None:
+                kronos_result = kronos_adapter.forecast_direction(df)
+                _update_kronos_strategy_context(strategies, kronos_result)
+                print(
+                    "[realtime_strategy] kronos output: "
+                    f"available={kronos_result.available}, direction={kronos_result.direction}, "
+                    f"confidence={kronos_result.confidence:.4f}, "
+                    f"forecast_close={kronos_result.forecast_close}, reason={kronos_result.reason}"
+                )
 
             latest = feature_df.iloc[[-1]].copy()
             latest_features = latest[model.feature_cols]
