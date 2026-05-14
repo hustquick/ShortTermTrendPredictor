@@ -5,7 +5,15 @@ import argparse
 from realtime_strategy_runner import run_realtime_strategies
 
 
-DEFAULT_STRATEGIES = "short_momentum,relaxed_scenario,historical_match"
+DEFAULT_STRATEGIES = (
+    "short_momentum,"
+    "relaxed_scenario,"
+    "historical_match,"
+    "historical_match_long,"
+    "historical_match_short,"
+    "kronos_confirm,"
+    "finstar_scenario"
+)
 
 
 def main():
