@@ -8,14 +8,24 @@ from datetime import datetime
 from config import DATA_DIR, PREDICT_HORIZON_MINUTES, PREDICTIONS_CSV, REALTIME_INTERVAL_SECONDS
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from features import build_features
+from historical_match_filter import build_historical_match_rows
 from strategy_notifier import send_prediction_signal, send_validation_signal
-from strategies.rules import RelaxedScenarioStrategy, ShortMomentumStrategy
+from strategies.rules import (
+    HistoricalMatchLongStrategy,
+    HistoricalMatchShortStrategy,
+    HistoricalMatchStrategy,
+    RelaxedScenarioStrategy,
+    ShortMomentumStrategy,
+)
 from trainer import load_model, save_model, train_validation_model
 
 
 STRATEGY_MAP = {
     "short_momentum": ShortMomentumStrategy,
     "relaxed_scenario": RelaxedScenarioStrategy,
+    "historical_match": HistoricalMatchStrategy,
+    "historical_match_long": HistoricalMatchLongStrategy,
+    "historical_match_short": HistoricalMatchShortStrategy,
 }
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
@@ -85,7 +95,6 @@ def _append_csv_row(path, columns: list[str], row: dict):
 
 
 def append_prediction_csv(row: dict):
-    """保存策略实时预测。"""
     _append_csv_row(PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
     _append_csv_row(STRATEGY_PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
 
@@ -192,14 +201,7 @@ def validate_due_signals(df, now_ms: int):
     save_pending_signals(remaining)
 
 
-def register_prediction_signal(
-    strategy_name: str,
-    decision,
-    prediction: dict,
-    current_price: float,
-    signal_timestamp: int,
-    signal_time: str,
-):
+def register_prediction_signal(strategy_name: str, decision, prediction: dict, current_price: float, signal_timestamp: int, signal_time: str):
     prediction_id = f"{strategy_name}-{signal_timestamp}"
     validation_timestamp = signal_timestamp + PREDICT_HORIZON_MINUTES * 60_000
     validation_time = ms_to_beijing_time(validation_timestamp)
@@ -260,8 +262,21 @@ def register_prediction_signal(
     )
 
 
+def _refresh_historical_match_rows(df, feature_df, model):
+    historical_feature_df = feature_df.iloc[:-PREDICT_HORIZON_MINUTES].copy()
+    rows = build_historical_match_rows(historical_feature_df, model, df)
+    print(f"[realtime_strategy] historical_match_rows={len(rows)}")
+    return rows
+
+
+def _update_historical_strategy_context(strategies: list, historical_rows):
+    for strategy in strategies:
+        if hasattr(strategy, "update_history"):
+            strategy.update_history(historical_rows)
+
+
 def run_realtime_strategies(
-    strategy_names: str = "short_momentum,relaxed_scenario",
+    strategy_names: str = "short_momentum,relaxed_scenario,historical_match",
     train_minutes: int = 48 * 60,
     once: bool = False,
 ):
@@ -270,13 +285,14 @@ def run_realtime_strategies(
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
-    print("[realtime_strategy] supported strategies: short_momentum, relaxed_scenario")
+    print(f"[realtime_strategy] supported strategies: {','.join(STRATEGY_MAP.keys())}")
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
     print(f"[realtime_strategy] predictions_csv={PREDICTIONS_CSV}")
     print(f"[realtime_strategy] strategy_predictions_csv={STRATEGY_PREDICTIONS_CSV}")
 
     model = load_model()
     last_train_time = None
+    historical_rows = None
 
     while True:
         try:
@@ -303,6 +319,7 @@ def run_realtime_strategies(
                 save_model(model)
                 last_train_time = datetime.now()
                 print("[realtime_strategy] model updated")
+                historical_rows = None
 
             feature_df = build_features(df).dropna(subset=model.feature_cols).copy()
             if feature_df.empty:
@@ -311,6 +328,10 @@ def run_realtime_strategies(
                     return
                 time.sleep(REALTIME_INTERVAL_SECONDS)
                 continue
+
+            if historical_rows is None and any(hasattr(s, "update_history") for s in strategies):
+                historical_rows = _refresh_historical_match_rows(df, feature_df, model)
+                _update_historical_strategy_context(strategies, historical_rows)
 
             latest = feature_df.iloc[[-1]].copy()
             latest_features = latest[model.feature_cols]
