@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from config import PREDICT_HORIZON_MINUTES
+from trainer import _ensemble_predict_proba
 
 
 MATCH_LOOKBACK_DAYS = 60
@@ -14,6 +15,7 @@ MATCH_MIN_EDGE = 0.15
 MATCH_PROBA_BUCKET = 0.10
 MATCH_EDGE_BUCKET = 0.15
 MATCH_RSI_BUCKET = 10.0
+HISTORICAL_MATCH_MAX_ROWS = 6000
 
 
 @dataclass
@@ -26,9 +28,7 @@ class MatchResult:
 
 
 def _bucket(value: float, width: float) -> tuple[float, float]:
-    lower = value - width
-    upper = value + width
-    return lower, upper
+    return value - width, value + width
 
 
 def _same_sign_or_zero(series: pd.Series, value: float) -> pd.Series:
@@ -58,7 +58,6 @@ def evaluate_historical_match(
     """
     if candidate_direction not in {"up", "down"}:
         return MatchResult(False, "no_trade", 0, None, "invalid_direction")
-
     if historical_rows.empty:
         return MatchResult(False, candidate_direction, 0, None, "empty_history")
 
@@ -126,38 +125,55 @@ def evaluate_historical_match(
 
 
 def build_historical_match_rows(feature_df: pd.DataFrame, model, raw_df: pd.DataFrame) -> pd.DataFrame:
-    """Build historical rows with model outputs and future direction labels."""
+    """Build historical rows with vectorized model outputs and future labels."""
     if feature_df.empty:
         return pd.DataFrame()
 
+    required_feature_cols = [
+        "timestamp",
+        "close",
+        "trend_agreement",
+        "macd_hist",
+        "ret_5",
+        "ema_5_20_diff",
+        "rsi_14",
+        "boll_position",
+    ]
+    for col in required_feature_cols:
+        if col not in feature_df.columns:
+            return pd.DataFrame()
+
     close_by_timestamp = raw_df.set_index("timestamp")["close"]
-    rows = []
     horizon_ms = PREDICT_HORIZON_MINUTES * 60_000
 
-    for idx, row in feature_df.iterrows():
-        ts = int(row["timestamp"])
-        future_ts = ts + horizon_ms
-        if future_ts not in close_by_timestamp.index:
-            continue
-        X = row[model.feature_cols].to_frame().T
-        if X.isna().any(axis=None):
-            continue
-        pred = model.predict_one(X, signal_filter=None)
-        rows.append(
-            {
-                "timestamp": ts,
-                "close": float(row["close"]),
-                "future_close": float(close_by_timestamp.loc[future_ts]),
-                "up_signal_probability": pred.get("up_signal_probability"),
-                "down_signal_probability": pred.get("down_signal_probability"),
-                "direction_edge": pred.get("direction_edge"),
-                "trend_agreement": row.get("trend_agreement"),
-                "macd_hist": row.get("macd_hist"),
-                "ret_5": row.get("ret_5"),
-                "ema_5_20_diff": row.get("ema_5_20_diff"),
-                "rsi_14": row.get("rsi_14"),
-                "boll_position": row.get("boll_position"),
-            }
-        )
+    data = feature_df.dropna(subset=model.feature_cols + required_feature_cols).copy()
+    if len(data) > HISTORICAL_MATCH_MAX_ROWS:
+        data = data.tail(HISTORICAL_MATCH_MAX_ROWS).copy()
 
-    return pd.DataFrame(rows)
+    data["future_timestamp"] = data["timestamp"].astype(int) + horizon_ms
+    data["future_close"] = data["future_timestamp"].map(close_by_timestamp)
+    data = data.dropna(subset=["future_close"]).copy()
+    if data.empty:
+        return pd.DataFrame()
+
+    X = data[model.feature_cols]
+    p_up = _ensemble_predict_proba(model.up_models, X)
+    p_down = _ensemble_predict_proba(model.down_models, X)
+
+    out = data[
+        [
+            "timestamp",
+            "close",
+            "future_close",
+            "trend_agreement",
+            "macd_hist",
+            "ret_5",
+            "ema_5_20_diff",
+            "rsi_14",
+            "boll_position",
+        ]
+    ].copy()
+    out["up_signal_probability"] = p_up
+    out["down_signal_probability"] = p_down
+    out["direction_edge"] = out["up_signal_probability"] - out["down_signal_probability"]
+    return out.reset_index(drop=True)
