@@ -34,6 +34,7 @@ STRATEGY_MAP = {
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
 VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 STRATEGY_PREDICTIONS_CSV = DATA_DIR / "strategy_predictions.csv"
+STRATEGY_PREDICTIONS_LATEST_CSV = DATA_DIR / "strategy_predictions_latest.csv"
 
 PREDICTION_COLUMNS = [
     "prediction_id",
@@ -97,9 +98,60 @@ def _append_csv_row(path, columns: list[str], row: dict):
         writer.writerow({col: row.get(col, "") for col in columns})
 
 
+def _load_latest_prediction_rows() -> dict[str, dict]:
+    if not STRATEGY_PREDICTIONS_LATEST_CSV.exists():
+        return {}
+    with open(STRATEGY_PREDICTIONS_LATEST_CSV, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        return {row["prediction_id"]: row for row in reader if row.get("prediction_id")}
+
+
+def _save_latest_prediction_rows(rows_by_id: dict[str, dict]):
+    DATA_DIR.mkdir(exist_ok=True)
+    with open(STRATEGY_PREDICTIONS_LATEST_CSV, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PREDICTION_COLUMNS)
+        writer.writeheader()
+        for row in sorted(rows_by_id.values(), key=lambda x: str(x.get("timestamp", ""))):
+            writer.writerow({col: row.get(col, "") for col in PREDICTION_COLUMNS})
+
+
+def _update_latest_prediction(row: dict):
+    prediction_id = row.get("prediction_id")
+    if not prediction_id:
+        return
+    rows_by_id = _load_latest_prediction_rows()
+    current = rows_by_id.get(prediction_id, {})
+    merged = {**current, **row}
+    if row.get("validation_status") == "validated":
+        merged["validation_status"] = "validated"
+    rows_by_id[prediction_id] = merged
+    _save_latest_prediction_rows(rows_by_id)
+
+
+def rebuild_latest_predictions_from_log():
+    """Rebuild de-duplicated latest snapshot from append-only strategy_predictions.csv."""
+    if not STRATEGY_PREDICTIONS_CSV.exists():
+        _save_latest_prediction_rows({})
+        return
+    rows_by_id = {}
+    with open(STRATEGY_PREDICTIONS_CSV, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            prediction_id = row.get("prediction_id")
+            if not prediction_id:
+                continue
+            current = rows_by_id.get(prediction_id, {})
+            merged = {**current, **row}
+            if row.get("validation_status") == "validated":
+                merged["validation_status"] = "validated"
+            rows_by_id[prediction_id] = merged
+    _save_latest_prediction_rows(rows_by_id)
+
+
 def append_prediction_csv(row: dict):
     _append_csv_row(PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
     _append_csv_row(STRATEGY_PREDICTIONS_CSV, PREDICTION_COLUMNS, row)
+    _update_latest_prediction(row)
 
 
 def append_validated_signal(row: dict):
@@ -300,6 +352,8 @@ def run_realtime_strategies(
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
     print(f"[realtime_strategy] predictions_csv={PREDICTIONS_CSV}")
     print(f"[realtime_strategy] strategy_predictions_csv={STRATEGY_PREDICTIONS_CSV}")
+    print(f"[realtime_strategy] strategy_predictions_latest_csv={STRATEGY_PREDICTIONS_LATEST_CSV}")
+    rebuild_latest_predictions_from_log()
 
     model = load_model()
     last_train_time = None
