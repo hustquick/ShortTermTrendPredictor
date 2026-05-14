@@ -3,6 +3,7 @@
 import pandas as pd
 
 from config import LONG_SIGNAL_THRESHOLD, SHORT_SIGNAL_THRESHOLD
+from finstar_scenario_layer import evaluate_finstar_scenario
 from high_win_rate_filter import passes_high_win_rate_filter
 from historical_match_filter import evaluate_historical_match
 from strategies.base import StrategyDecision, feature_value
@@ -257,12 +258,6 @@ class HistoricalMatchShortStrategy(HistoricalMatchStrategy):
 
 
 class KronosConfirmStrategy:
-    """Kronos confirmation strategy.
-
-    The strategy only emits a direction when the dual-model candidate and Kronos
-    forecast direction agree. It is an experimental parallel strategy.
-    """
-
     name = "kronos_confirm"
 
     def __init__(self):
@@ -276,34 +271,57 @@ class KronosConfirmStrategy:
         p_down = float(prediction.get("down_signal_probability", 0.0))
         edge = float(prediction.get("direction_edge", 0.0))
         confidence = max(p_up, p_down)
-
         if self.kronos_result is None:
             return StrategyDecision("no_trade", confidence, "kronos_not_ready")
         if not getattr(self.kronos_result, "available", False):
             return StrategyDecision("no_trade", confidence, getattr(self.kronos_result, "reason", "kronos_unavailable"))
-
         if edge > 0.15 and p_up > p_down:
             candidate = "up"
         elif edge < -0.15 and p_down > p_up:
             candidate = "down"
         else:
             return StrategyDecision("no_trade", confidence, "no_dual_model_candidate")
-
         kronos_direction = getattr(self.kronos_result, "direction", "no_trade")
         kronos_confidence = float(getattr(self.kronos_result, "confidence", 0.0))
         if kronos_direction != candidate:
             return StrategyDecision(
-                "no_trade",
-                confidence,
+                "no_trade", confidence,
                 f"kronos_disagree;kronos={kronos_direction};candidate={candidate};kronos_conf={kronos_confidence:.4f}",
             )
-
         combined_confidence = min(1.0, 0.7 * confidence + 0.3 * kronos_confidence)
         return StrategyDecision(
             candidate,
             combined_confidence,
             f"kronos_confirmed;kronos={kronos_direction};kronos_conf={kronos_confidence:.4f}",
         )
+
+
+class FinStarScenarioStrategy:
+    name = "finstar_scenario"
+
+    def __init__(self):
+        self.historical_rows = pd.DataFrame()
+        self.kronos_result = None
+        self.last_result = None
+
+    def update_history(self, historical_rows: pd.DataFrame):
+        self.historical_rows = historical_rows
+
+    def update_kronos_result(self, kronos_result):
+        self.kronos_result = kronos_result
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        result = evaluate_finstar_scenario(
+            features=features,
+            prediction=prediction,
+            historical_rows=self.historical_rows,
+            kronos_result=self.kronos_result,
+        )
+        self.last_result = result
+        reason = f"finstar_scenario={result.scenario};market_state={result.market_state.market_state};{result.reason}"
+        if result.accepted:
+            return StrategyDecision(result.direction, result.confidence, reason)
+        return StrategyDecision("no_trade", result.confidence, reason)
 
 
 def default_strategies():
@@ -317,6 +335,7 @@ def default_strategies():
         HistoricalMatchLongStrategy(),
         HistoricalMatchShortStrategy(),
         KronosConfirmStrategy(),
+        FinStarScenarioStrategy(),
         HighConfidenceFilterStrategy(),
         ScenarioAwareStrategy(),
     ]
