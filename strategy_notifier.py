@@ -55,6 +55,18 @@ def _edge_text(edge: float) -> str:
     return f"➖ 方向优势 edge(up-down)：{edge:.4f}"
 
 
+def _fmt_rate(value: float | None) -> str:
+    if value is None:
+        return "暂无"
+    return f"{value:.2%}"
+
+
+def _fmt_int(value: int | None) -> str:
+    if value is None:
+        return "0"
+    return str(value)
+
+
 def send_prediction_signal(
     strategy_name: str,
     direction: str,
@@ -115,6 +127,9 @@ def send_validation_signal(
     up_signal_probability: float | None = None,
     down_signal_probability: float | None = None,
     direction_edge: float | None = None,
+    strategy_accuracy: float | None = None,
+    strategy_correct_count: int | None = None,
+    strategy_total_count: int | None = None,
 ) -> bool:
     display_name = strategy_display_name(strategy_name)
     result_emoji = "✅" if is_correct else "❌"
@@ -130,6 +145,8 @@ def send_validation_signal(
         f"⏰ 信号时间：{signal_time}",
         f"🕒 验证时间：{validation_time}",
         f"🔥 原始策略置信度：{confidence:.4f}",
+        f"📊 该策略高置信统计准确率：{_fmt_rate(strategy_accuracy)}",
+        f"🧮 该策略已验证高置信样本：{_fmt_int(strategy_correct_count)}/{_fmt_int(strategy_total_count)}",
     ]
 
     lines.append("")
