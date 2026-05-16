@@ -174,6 +174,31 @@ def append_validated_signal(row: dict):
     _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
 
+def _load_strategy_accuracy_before(strategy_name: str) -> tuple[float | None, int, int]:
+    if not VALIDATED_STRATEGY_SIGNALS.exists():
+        return None, 0, 0
+    total = 0
+    correct = 0
+    with open(VALIDATED_STRATEGY_SIGNALS, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("strategy") != strategy_name:
+                continue
+            total += 1
+            if str(row.get("correct", "")).lower() == "true":
+                correct += 1
+    if total == 0:
+        return None, correct, total
+    return correct / total, correct, total
+
+
+def _strategy_accuracy_after_current(strategy_name: str, current_correct: bool) -> tuple[float, int, int]:
+    previous_accuracy, previous_correct, previous_total = _load_strategy_accuracy_before(strategy_name)
+    correct = previous_correct + (1 if current_correct else 0)
+    total = previous_total + 1
+    return correct / total, correct, total
+
+
 def validate_due_signals(df, now_ms: int):
     pending = load_pending_signals()
     if not pending:
@@ -197,6 +222,10 @@ def validate_due_signals(df, now_ms: int):
         predicted_direction = row["direction"]
         is_correct = predicted_direction == actual_direction
         validation_time = ms_to_beijing_time(validation_timestamp)
+        strategy_accuracy, strategy_correct_count, strategy_total_count = _strategy_accuracy_after_current(
+            row["strategy"],
+            is_correct,
+        )
 
         validation_row = {
             "prediction_id": row["prediction_id"],
@@ -247,11 +276,16 @@ def validate_due_signals(df, now_ms: int):
             up_signal_probability=row.get("up_signal_probability"),
             down_signal_probability=row.get("down_signal_probability"),
             direction_edge=row.get("direction_edge"),
+            strategy_accuracy=strategy_accuracy,
+            strategy_correct_count=strategy_correct_count,
+            strategy_total_count=strategy_total_count,
         )
         print(
             "[realtime_strategy] validation: "
             f"strategy={row['strategy']}, id={row['prediction_id']}, "
-            f"predicted={predicted_direction}, actual={actual_direction}, correct={is_correct}"
+            f"predicted={predicted_direction}, actual={actual_direction}, correct={is_correct}, "
+            f"strategy_accuracy={strategy_accuracy:.4f}, "
+            f"strategy_samples={strategy_correct_count}/{strategy_total_count}"
         )
 
     save_pending_signals(remaining)
