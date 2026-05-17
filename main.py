@@ -73,6 +73,17 @@ def run_realtime():
     realtime_loop()
 
 
+def run_realtime_strategies(strategy_names: str | None = None, observe_all: bool = False):
+    """
+    启动多策略实时预测。默认只运行当前正式高胜率策略。
+    """
+    from run_realtime_strategies import DEFAULT_STRATEGIES, OBSERVATION_STRATEGIES
+    from realtime_strategy_runner import run_realtime_strategies as run_strategy_loop
+
+    selected = OBSERVATION_STRATEGIES if observe_all else strategy_names or DEFAULT_STRATEGIES
+    run_strategy_loop(strategy_names=selected)
+
+
 def run_tune_dual_model(
     tune_days: int | None = None,
     no_update_cache: bool = False,
@@ -278,11 +289,12 @@ def main():
         choices=[
             "train",
             "realtime",
+            "realtime_strategies",
             "training_backtest",
             "strict_backtest",
             "tune_dual_model",
         ],
-        help="运行模式：train / realtime / training_backtest / strict_backtest / tune_dual_model",
+        help="运行模式：train / realtime / realtime_strategies / training_backtest / strict_backtest / tune_dual_model",
     )
 
     parser.add_argument(
@@ -326,6 +338,19 @@ def main():
         help="只使用本地历史数据，不联网补充最新数据。",
     )
 
+    parser.add_argument(
+        "--strategies",
+        type=str,
+        default=None,
+        help="realtime_strategies 模式下运行的逗号分隔策略名。",
+    )
+
+    parser.add_argument(
+        "--observe-all",
+        action="store_true",
+        help="realtime_strategies 模式下运行全部策略做观察。",
+    )
+
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -333,6 +358,9 @@ def main():
 
     elif args.mode == "realtime":
         run_realtime()
+
+    elif args.mode == "realtime_strategies":
+        run_realtime_strategies(strategy_names=args.strategies, observe_all=args.observe_all)
 
     elif args.mode == "training_backtest":
         run_training_backtest(no_update_cache=args.no_update_cache)

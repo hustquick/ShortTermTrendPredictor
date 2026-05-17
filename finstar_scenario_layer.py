@@ -10,8 +10,6 @@ from market_state_assessor import MarketState, assess_market_state
 
 FINSTAR_MIN_EDGE = 0.15
 FINSTAR_MIN_CONFIDENCE = 0.55
-FINSTAR_STRONG_CONFIDENCE = 0.70
-
 
 @dataclass
 class FinStarScenarioResult:
@@ -87,13 +85,21 @@ def evaluate_finstar_scenario(
     if not scenario_ok:
         return FinStarScenarioResult(False, "no_trade", confidence, scenario, state, scenario_reason)
 
-    match_reason = "historical_match_not_used"
-    if historical_rows is not None and not historical_rows.empty:
-        match = evaluate_historical_match(historical_rows, features, prediction, direction)
-        success = "None" if match.success_rate is None else f"{match.success_rate:.4f}"
-        match_reason = f"match={match.reason};matched={match.matched_signals};success_rate={success}"
-        if not match.accepted and confidence < FINSTAR_STRONG_CONFIDENCE:
-            return FinStarScenarioResult(False, "no_trade", confidence, scenario, state, match_reason)
+    if historical_rows is None or historical_rows.empty:
+        return FinStarScenarioResult(
+            False,
+            "no_trade",
+            confidence,
+            scenario,
+            state,
+            "historical_match_required_but_empty",
+        )
+
+    match = evaluate_historical_match(historical_rows, features, prediction, direction)
+    success = "None" if match.success_rate is None else f"{match.success_rate:.4f}"
+    match_reason = f"match={match.reason};matched={match.matched_signals};success_rate={success}"
+    if not match.accepted:
+        return FinStarScenarioResult(False, "no_trade", confidence, scenario, state, match_reason)
 
     kronos_reason = "kronos_not_used"
     if kronos_result is not None:

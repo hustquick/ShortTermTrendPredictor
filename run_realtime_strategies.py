@@ -6,6 +6,10 @@ from realtime_strategy_runner import run_realtime_strategies
 
 
 DEFAULT_STRATEGIES = (
+    "historical_match_short"
+)
+
+OBSERVATION_STRATEGIES = (
     "short_momentum,"
     "relaxed_scenario,"
     "historical_match,"
@@ -25,6 +29,11 @@ def main():
         help=f"Comma-separated strategy names. Default: {DEFAULT_STRATEGIES}",
     )
     parser.add_argument(
+        "--observe-all",
+        action="store_true",
+        help=f"Run all strategies for observation. Equivalent to --strategies {OBSERVATION_STRATEGIES}",
+    )
+    parser.add_argument(
         "--train-minutes",
         type=int,
         default=48 * 60,
@@ -36,9 +45,10 @@ def main():
         help="Run one prediction and validation cycle, then exit.",
     )
     args = parser.parse_args()
+    strategy_names = OBSERVATION_STRATEGIES if args.observe_all else args.strategies
 
     run_realtime_strategies(
-        strategy_names=args.strategies,
+        strategy_names=strategy_names,
         train_minutes=args.train_minutes,
         once=args.once,
     )

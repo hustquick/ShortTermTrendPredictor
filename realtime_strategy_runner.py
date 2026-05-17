@@ -5,10 +5,16 @@ import json
 import time
 from datetime import datetime
 
-from config import DATA_DIR, PREDICT_HORIZON_MINUTES, PREDICTIONS_CSV, REALTIME_INTERVAL_SECONDS
+from config import (
+    DATA_DIR,
+    OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST,
+    PREDICT_HORIZON_MINUTES,
+    PREDICTIONS_CSV,
+    REALTIME_INTERVAL_SECONDS,
+)
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from features import build_features
-from historical_match_filter import build_historical_match_rows
+from historical_match_filter import build_walk_forward_historical_match_rows
 from kronos_adapter import KronosAdapter
 from strategy_notifier import send_prediction_signal, send_validation_signal
 from strategies.rules import (
@@ -55,6 +61,8 @@ PREDICTION_COLUMNS = [
     "future_price",
     "is_correct",
 ]
+
+OFFICIAL_SIGNAL_STRATEGIES = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
 
 
 def parse_strategy_names(strategy_names: str):
@@ -199,6 +207,10 @@ def _strategy_accuracy_after_current(strategy_name: str, current_correct: bool) 
     return correct / total, correct, total
 
 
+def is_official_signal_strategy(strategy_name: str) -> bool:
+    return strategy_name in OFFICIAL_SIGNAL_STRATEGIES
+
+
 def validate_due_signals(df, now_ms: int):
     pending = load_pending_signals()
     if not pending:
@@ -262,24 +274,28 @@ def validate_due_signals(df, now_ms: int):
                 "is_correct": is_correct,
             }
         )
-        send_validation_signal(
-            strategy_name=row["strategy"],
-            prediction_id=row["prediction_id"],
-            predicted_direction=predicted_direction,
-            actual_direction=actual_direction,
-            is_correct=is_correct,
-            signal_price=signal_price,
-            validation_price=validation_price,
-            signal_time=row["signal_time"],
-            validation_time=validation_time,
-            confidence=float(row["confidence"]),
-            up_signal_probability=row.get("up_signal_probability"),
-            down_signal_probability=row.get("down_signal_probability"),
-            direction_edge=row.get("direction_edge"),
-            strategy_accuracy=strategy_accuracy,
-            strategy_correct_count=strategy_correct_count,
-            strategy_total_count=strategy_total_count,
-        )
+        notify_enabled = str(row.get("notify_enabled", "")).lower() == "true" or is_official_signal_strategy(row["strategy"])
+        if notify_enabled:
+            send_validation_signal(
+                strategy_name=row["strategy"],
+                prediction_id=row["prediction_id"],
+                predicted_direction=predicted_direction,
+                actual_direction=actual_direction,
+                is_correct=is_correct,
+                signal_price=signal_price,
+                validation_price=validation_price,
+                signal_time=row["signal_time"],
+                validation_time=validation_time,
+                confidence=float(row["confidence"]),
+                up_signal_probability=row.get("up_signal_probability"),
+                down_signal_probability=row.get("down_signal_probability"),
+                direction_edge=row.get("direction_edge"),
+                strategy_accuracy=strategy_accuracy,
+                strategy_correct_count=strategy_correct_count,
+                strategy_total_count=strategy_total_count,
+            )
+        else:
+            print(f"[realtime_strategy] validation notification skipped for observation strategy={row['strategy']}")
         print(
             "[realtime_strategy] validation: "
             f"strategy={row['strategy']}, id={row['prediction_id']}, "
@@ -300,6 +316,8 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
     if any(row.get("prediction_id") == prediction_id for row in pending):
         return
 
+    notify_enabled = is_official_signal_strategy(strategy_name)
+
     row = {
         "prediction_id": prediction_id,
         "strategy": strategy_name,
@@ -313,6 +331,7 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
         "up_signal_probability": prediction.get("up_signal_probability"),
         "down_signal_probability": prediction.get("down_signal_probability"),
         "direction_edge": prediction.get("direction_edge"),
+        "notify_enabled": notify_enabled,
     }
     pending.append(row)
     save_pending_signals(pending)
@@ -337,25 +356,28 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
         }
     )
 
-    send_prediction_signal(
-        strategy_name=strategy_name,
-        direction=decision.direction,
-        confidence=float(decision.confidence),
-        current_price=float(current_price),
-        timestamp=signal_time,
-        reason=decision.reason,
-        prediction_id=prediction_id,
-        up_signal_probability=prediction.get("up_signal_probability"),
-        down_signal_probability=prediction.get("down_signal_probability"),
-        direction_edge=prediction.get("direction_edge"),
-        horizon_minutes=PREDICT_HORIZON_MINUTES,
-    )
+    if notify_enabled:
+        send_prediction_signal(
+            strategy_name=strategy_name,
+            direction=decision.direction,
+            confidence=float(decision.confidence),
+            current_price=float(current_price),
+            timestamp=signal_time,
+            reason=decision.reason,
+            prediction_id=prediction_id,
+            up_signal_probability=prediction.get("up_signal_probability"),
+            down_signal_probability=prediction.get("down_signal_probability"),
+            direction_edge=prediction.get("direction_edge"),
+            horizon_minutes=PREDICT_HORIZON_MINUTES,
+        )
+    else:
+        print(f"[realtime_strategy] prediction notification skipped for observation strategy={strategy_name}")
 
 
 def _refresh_historical_match_rows(df, feature_df, model):
     historical_feature_df = feature_df.iloc[:-PREDICT_HORIZON_MINUTES].copy()
-    rows = build_historical_match_rows(historical_feature_df, model, df)
-    print(f"[realtime_strategy] historical_match_rows={len(rows)}")
+    rows = build_walk_forward_historical_match_rows(historical_feature_df, df)
+    print(f"[realtime_strategy] walk_forward_historical_match_rows={len(rows)}")
     return rows
 
 
@@ -383,6 +405,7 @@ def run_realtime_strategies(
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
+    print(f"[realtime_strategy] official_notification_allowlist={','.join(sorted(OFFICIAL_SIGNAL_STRATEGIES))}")
     print(f"[realtime_strategy] supported strategies: {','.join(STRATEGY_MAP.keys())}")
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
     print(f"[realtime_strategy] predictions_csv={PREDICTIONS_CSV}")

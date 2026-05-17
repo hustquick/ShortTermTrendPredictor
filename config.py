@@ -144,6 +144,10 @@ HIGH_WIN_RATE_MIN_BOLL_POSITION_SHORT = 0.10
 REALTIME_INTERVAL_SECONDS = 60
 RETRAIN_INTERVAL_SECONDS = 30 * 60
 
+# 生产通知白名单。其他策略可以继续记录和验证，但不会推送企业微信正式信号。
+OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = ("historical_match_short",)
+HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES = 120
+
 # =========================
 # 严格回测配置
 # =========================

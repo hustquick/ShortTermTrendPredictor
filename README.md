@@ -99,6 +99,29 @@ python3 main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --mod
 python3 main.py --mode realtime
 ```
 
+启动当前高胜率实时策略通知：
+
+```bash
+python3 main.py --mode realtime_strategies
+```
+
+当前默认只运行 `historical_match_short` 作为正式高置信策略。该策略在最新已验证样本中表现最好，`historical_match_long` 暂不作为正式信号；如果需要继续观察所有策略，可以运行：
+
+```bash
+python3 main.py --mode realtime_strategies --observe-all
+```
+
+`finstar_scenario` 已收紧为必须通过历史相似样本验证才允许出信号，避免只凭高模型置信度放行低质量场景信号。
+
+生产通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前只有 `historical_match_short` 会推送企业微信预测和验证通知；其他策略即使用 `--observe-all` 运行，也只写入 CSV 和 pending 验证队列，不发送正式通知。
+
+历史相似样本匹配使用 walk-forward 样本外概率池：每个历史样本只使用该时间桶之前的数据训练出来的模型概率，避免当前模型回头给整段历史打分造成 `success_rate=1.0000` 的乐观偏差。历史池默认每 120 分钟重训一次以控制实时启动耗时，实时主模型仍按原配置重训。
+
+策略层增加了统一陷阱过滤：
+
+- short 拒绝反弹陷阱：`ret_10 > 0 且 macd_hist > 0`、`ret_30 > 0 且 macd_hist > 0`、`close_position < 0.02`、`close_position > 0.98 且 ret_10 > 0`、或 `rsi_14 < 45 且 boll_position <= 0.15`。
+- long 拒绝追高陷阱：`rsi_14 > 80`、`boll_position > 0.84`、或 `close_position > 0.98`。
+
 如果网络无法访问币安，可先把 `data/BTCUSDT_1m_history.csv` 放入本地，并在严格回测时使用：
 
 ```bash

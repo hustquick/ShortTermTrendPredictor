@@ -4,8 +4,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from config import PREDICT_HORIZON_MINUTES
-from trainer import _ensemble_predict_proba
+from config import (
+    BACKTEST_MIN_TRAIN_SAMPLES,
+    BACKTEST_TRAIN_WINDOW_MINUTES,
+    HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES,
+    PREDICT_HORIZON_MINUTES,
+)
+from trainer import _ensemble_predict_proba, train_validation_model
 
 
 MATCH_LOOKBACK_DAYS = 60
@@ -177,3 +182,99 @@ def build_historical_match_rows(feature_df: pd.DataFrame, model, raw_df: pd.Data
     out["down_signal_probability"] = p_down
     out["direction_edge"] = out["up_signal_probability"] - out["down_signal_probability"]
     return out.reset_index(drop=True)
+
+
+def build_walk_forward_historical_match_rows(
+    feature_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    train_window_minutes: int = BACKTEST_TRAIN_WINDOW_MINUTES,
+    model_update_minutes: int = HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES,
+    min_train_samples: int = BACKTEST_MIN_TRAIN_SAMPLES,
+) -> pd.DataFrame:
+    """Build historical match rows with out-of-sample model scores.
+
+    Each historical row is scored by a model trained only on candles strictly
+    before the row's time bucket. This avoids the optimistic "current model
+    scores all history" leakage that made matched success rates too good.
+    """
+    if feature_df.empty or raw_df.empty:
+        return pd.DataFrame()
+
+    required_feature_cols = [
+        "timestamp",
+        "close",
+        "trend_agreement",
+        "macd_hist",
+        "ret_5",
+        "ema_5_20_diff",
+        "rsi_14",
+        "boll_position",
+    ]
+    for col in required_feature_cols:
+        if col not in feature_df.columns:
+            return pd.DataFrame()
+
+    raw = raw_df.sort_values("timestamp").copy()
+    features = feature_df.sort_values("timestamp").copy()
+    close_by_timestamp = raw.set_index("timestamp")["close"]
+    horizon_ms = PREDICT_HORIZON_MINUTES * 60_000
+    update_ms = model_update_minutes * 60_000
+    train_window_ms = train_window_minutes * 60_000
+
+    data = features.dropna(subset=required_feature_cols).copy()
+    if len(data) > HISTORICAL_MATCH_MAX_ROWS:
+        data = data.tail(HISTORICAL_MATCH_MAX_ROWS).copy()
+
+    data["future_timestamp"] = data["timestamp"].astype(int) + horizon_ms
+    data["future_close"] = data["future_timestamp"].map(close_by_timestamp)
+    data = data.dropna(subset=["future_close"]).copy()
+    if data.empty:
+        return pd.DataFrame()
+
+    data["score_bucket"] = (data["timestamp"].astype(int) // update_ms) * update_ms
+    rows = []
+
+    for bucket_start, bucket_df in data.groupby("score_bucket", sort=True):
+        bucket_start = int(bucket_start)
+        train_start = bucket_start - train_window_ms
+        train_df = raw[(raw["timestamp"] >= train_start) & (raw["timestamp"] < bucket_start)].copy()
+        if len(train_df) < min_train_samples:
+            continue
+
+        try:
+            bucket_model = train_validation_model(train_df)
+        except Exception as exc:
+            print(
+                "[historical_match] skip walk-forward bucket: "
+                f"bucket={bucket_start}, error={type(exc).__name__}: {exc}"
+            )
+            continue
+
+        usable = bucket_df.dropna(subset=bucket_model.feature_cols).copy()
+        if usable.empty:
+            continue
+
+        X = usable[bucket_model.feature_cols]
+        out = usable[
+            [
+                "timestamp",
+                "close",
+                "future_close",
+                "trend_agreement",
+                "macd_hist",
+                "ret_5",
+                "ema_5_20_diff",
+                "rsi_14",
+                "boll_position",
+            ]
+        ].copy()
+        out["up_signal_probability"] = _ensemble_predict_proba(bucket_model.up_models, X)
+        out["down_signal_probability"] = _ensemble_predict_proba(bucket_model.down_models, X)
+        out["direction_edge"] = out["up_signal_probability"] - out["down_signal_probability"]
+        out["scored_model_time"] = int(bucket_start)
+        rows.append(out)
+
+    if not rows:
+        return pd.DataFrame()
+
+    return pd.concat(rows, ignore_index=True).tail(HISTORICAL_MATCH_MAX_ROWS).reset_index(drop=True)
