@@ -400,7 +400,7 @@ def run_realtime_strategies(
 ):
     names = parse_strategy_names(strategy_names)
     strategies = [STRATEGY_MAP[name]() for name in names]
-    use_kronos = any(hasattr(strategy, "update_kronos_result") for strategy in strategies)
+    use_kronos = "kronos_confirm" in names
     kronos_adapter = KronosAdapter() if use_kronos else None
 
     print("[realtime_strategy] start")

@@ -113,7 +113,7 @@ python3 main.py --mode realtime_strategies --observe-all
 
 `finstar_scenario` 已收紧为必须通过历史相似样本验证才允许出信号，避免只凭高模型置信度放行低质量场景信号。
 
-生产通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前只有 `historical_match_short` 会推送企业微信预测和验证通知；其他策略即使用 `--observe-all` 运行，也只写入 CSV 和 pending 验证队列，不发送正式通知。
+企业微信通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前所有实时策略都在白名单内；使用 `--observe-all` 运行时，任意策略产生 up/down 信号都会推送企业微信预测通知，并在 10 分钟后推送验证通知。
 
 历史相似样本匹配使用 walk-forward 样本外概率池：每个历史样本只使用该时间桶之前的数据训练出来的模型概率，避免当前模型回头给整段历史打分造成 `success_rate=1.0000` 的乐观偏差。历史池默认每 120 分钟重训一次以控制实时启动耗时，实时主模型仍按原配置重训。
 

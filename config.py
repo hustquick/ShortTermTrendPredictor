@@ -144,9 +144,28 @@ HIGH_WIN_RATE_MIN_BOLL_POSITION_SHORT = 0.10
 REALTIME_INTERVAL_SECONDS = 60
 RETRAIN_INTERVAL_SECONDS = 30 * 60
 
-# 生产通知白名单。其他策略可以继续记录和验证，但不会推送企业微信正式信号。
-OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = ("historical_match_short",)
+# 企业微信通知白名单。列入的策略产生 up/down 信号时会推送预测和验证通知。
+OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = (
+    "short_momentum",
+    "relaxed_scenario",
+    "historical_match",
+    "historical_match_long",
+    "historical_match_short",
+    "kronos_confirm",
+    "finstar_scenario",
+)
 HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES = 120
+
+# Kronos 可选确认模型。默认只使用本地 Hugging Face 缓存，避免实时循环临时下载卡住。
+KRONOS_MODEL_NAME = "NeoQuasar/Kronos-small"
+KRONOS_TOKENIZER_NAME = "NeoQuasar/Kronos-Tokenizer-base"
+KRONOS_LOCAL_FILES_ONLY = True
+KRONOS_DEVICE = "cpu"
+KRONOS_LOOKBACK = 128
+KRONOS_MAX_CONTEXT = 128
+KRONOS_LOAD_TIMEOUT_SECONDS = 30
+KRONOS_PREDICT_TIMEOUT_SECONDS = 45
+KRONOS_USE_SUBPROCESS = True
 
 # =========================
 # 严格回测配置
