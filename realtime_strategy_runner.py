@@ -2,11 +2,28 @@
 
 import csv
 import json
+import os
+import pickle
+import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
+
+csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
 from config import (
+    ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION,
+    ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
+    ADAPTIVE_NOTIFY_MIN_EDGE,
     DATA_DIR,
+    HISTORICAL_MATCH_CACHE_FILE,
+    HISTORICAL_MATCH_CACHE_MAX_AGE_MINUTES,
+    HISTORICAL_MATCH_CACHE_STALE_MAX_HOURS,
+    HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES,
+    KRONOS_NOTIFY_ALLOW_DOWN,
+    KRONOS_NOTIFY_MIN_CONFIDENCE,
+    KRONOS_RUN_MIN_CONFIDENCE,
+    KRONOS_RUN_MIN_EDGE,
     OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST,
     PREDICT_HORIZON_MINUTES,
     PREDICTIONS_CSV,
@@ -15,14 +32,17 @@ from config import (
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from features import build_features
 from historical_match_filter import build_walk_forward_historical_match_rows
-from kronos_adapter import KronosAdapter
+from kronos_adapter import KronosAdapter, KronosForecastResult
+from strategy_learning import build_learning_state, feature_signature, learning_decision
 from strategy_notifier import send_prediction_signal, send_validation_signal
 from strategies.rules import (
+    AdaptiveDualStrategy,
     FinStarScenarioStrategy,
     HistoricalMatchLongStrategy,
     HistoricalMatchShortStrategy,
     HistoricalMatchStrategy,
     KronosConfirmStrategy,
+    KronosLeadStrategy,
     RelaxedScenarioStrategy,
     ShortMomentumStrategy,
 )
@@ -31,11 +51,13 @@ from trainer import load_model, save_model, train_validation_model
 
 STRATEGY_MAP = {
     "short_momentum": ShortMomentumStrategy,
+    "adaptive_dual": AdaptiveDualStrategy,
     "relaxed_scenario": RelaxedScenarioStrategy,
     "historical_match": HistoricalMatchStrategy,
     "historical_match_long": HistoricalMatchLongStrategy,
     "historical_match_short": HistoricalMatchShortStrategy,
     "kronos_confirm": KronosConfirmStrategy,
+    "kronos_lead": KronosLeadStrategy,
     "finstar_scenario": FinStarScenarioStrategy,
 }
 
@@ -43,6 +65,8 @@ PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
 VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 STRATEGY_PREDICTIONS_CSV = DATA_DIR / "strategy_predictions.csv"
 STRATEGY_PREDICTIONS_LATEST_CSV = DATA_DIR / "strategy_predictions_latest.csv"
+PER_STRATEGY_PREDICTIONS_DIR = DATA_DIR / "strategy_predictions"
+STRATEGY_CHARTS_DIR = DATA_DIR / "strategy_charts"
 
 PREDICTION_COLUMNS = [
     "prediction_id",
@@ -60,6 +84,26 @@ PREDICTION_COLUMNS = [
     "actual_direction",
     "future_price",
     "is_correct",
+]
+
+PER_STRATEGY_PREDICTION_COLUMNS = [
+    "prediction_id",
+    "timestamp",
+    "strategy",
+    "current_price",
+    "raw_direction",
+    "final_direction",
+    "confidence",
+    "reason",
+    "up_signal_probability",
+    "down_signal_probability",
+    "direction_edge",
+    "validation_timestamp",
+    "validation_status",
+    "actual_direction",
+    "future_price",
+    "is_correct",
+    "notify_enabled",
 ]
 
 OFFICIAL_SIGNAL_STRATEGIES = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
@@ -93,19 +137,67 @@ def load_pending_signals() -> list[dict]:
 
 def save_pending_signals(rows: list[dict]):
     DATA_DIR.mkdir(exist_ok=True)
-    with open(PENDING_STRATEGY_SIGNALS, "w", encoding="utf-8") as f:
+    tmp_path = PENDING_STRATEGY_SIGNALS.with_name(f".{PENDING_STRATEGY_SIGNALS.name}.{os.getpid()}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    tmp_path.replace(PENDING_STRATEGY_SIGNALS)
 
 
 def _append_csv_row(path, columns: list[str], row: dict):
-    DATA_DIR.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists()
+    if exists:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            current_columns = reader.fieldnames or []
+            if current_columns != columns:
+                rows = list(reader)
+                _write_csv_rows(path, columns, rows)
     with open(path, "a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         if not exists:
             writer.writeheader()
         writer.writerow({col: row.get(col, "") for col in columns})
+
+
+def _read_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _write_csv_rows(path: Path, columns: list[str], rows: list[dict]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({col: row.get(col, "") for col in columns})
+    tmp_path.replace(path)
+
+
+def _upsert_csv_row(path: Path, columns: list[str], row: dict, key: str = "prediction_id"):
+    rows = _read_csv_rows(path)
+    row_key = str(row.get(key, ""))
+    replaced = False
+    next_rows = []
+    for old_row in rows:
+        if row_key and str(old_row.get(key, "")) == row_key:
+            next_rows.append({**old_row, **row})
+            replaced = True
+        else:
+            next_rows.append(old_row)
+    if not replaced:
+        next_rows.append(row)
+    _write_csv_rows(path, columns, next_rows)
+
+
+def _strategy_prediction_csv_path(strategy_name: str) -> Path:
+    safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in strategy_name)
+    return PER_STRATEGY_PREDICTIONS_DIR / f"{safe_name}.csv"
 
 
 def _load_latest_prediction_rows() -> dict[str, dict]:
@@ -118,11 +210,15 @@ def _load_latest_prediction_rows() -> dict[str, dict]:
 
 def _save_latest_prediction_rows(rows_by_id: dict[str, dict]):
     DATA_DIR.mkdir(exist_ok=True)
-    with open(STRATEGY_PREDICTIONS_LATEST_CSV, "w", encoding="utf-8", newline="") as f:
+    tmp_path = STRATEGY_PREDICTIONS_LATEST_CSV.with_name(
+        f".{STRATEGY_PREDICTIONS_LATEST_CSV.name}.{os.getpid()}.tmp"
+    )
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=PREDICTION_COLUMNS)
         writer.writeheader()
         for row in sorted(rows_by_id.values(), key=lambda x: str(x.get("timestamp", ""))):
             writer.writerow({col: row.get(col, "") for col in PREDICTION_COLUMNS})
+    tmp_path.replace(STRATEGY_PREDICTIONS_LATEST_CSV)
 
 
 def _update_latest_prediction(row: dict):
@@ -163,6 +259,14 @@ def append_prediction_csv(row: dict):
     _update_latest_prediction(row)
 
 
+def upsert_per_strategy_prediction(strategy_name: str, row: dict):
+    _upsert_csv_row(
+        _strategy_prediction_csv_path(strategy_name),
+        PER_STRATEGY_PREDICTION_COLUMNS,
+        row,
+    )
+
+
 def append_validated_signal(row: dict):
     columns = [
         "prediction_id",
@@ -178,6 +282,9 @@ def append_validated_signal(row: dict):
         "up_signal_probability",
         "down_signal_probability",
         "direction_edge",
+        "feature_signature",
+        "learning_state",
+        "learning_reason",
     ]
     _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
@@ -211,6 +318,388 @@ def is_official_signal_strategy(strategy_name: str) -> bool:
     return strategy_name in OFFICIAL_SIGNAL_STRATEGIES
 
 
+def _extract_reason_float(reason: str, key: str) -> float | None:
+    prefix = f"{key}="
+    for part in str(reason).split(";"):
+        if not part.startswith(prefix):
+            continue
+        try:
+            return float(part[len(prefix):])
+        except ValueError:
+            return None
+    return None
+
+
+def passes_production_quality_gate(
+    strategy_name: str,
+    raw_direction: str,
+    confidence: float,
+    prediction: dict,
+    reason: str,
+    quality_context: dict | None = None,
+) -> tuple[bool, str]:
+    if strategy_name == "adaptive_dual":
+        edge = abs(float(prediction.get("direction_edge", 0.0)))
+        if confidence < ADAPTIVE_NOTIFY_MIN_CONFIDENCE:
+            return False, f"production_blocked;adaptive_confidence_below_{ADAPTIVE_NOTIFY_MIN_CONFIDENCE:.2f}"
+        if edge < ADAPTIVE_NOTIFY_MIN_EDGE:
+            return False, f"production_blocked;adaptive_edge_below_{ADAPTIVE_NOTIFY_MIN_EDGE:.2f}"
+        if ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION:
+            confirmations = (quality_context or {}).get("confirmations", {})
+            if not confirmations.get(raw_direction, False):
+                return False, "production_blocked;adaptive_missing_external_confirmation"
+        return True, "production_quality_passed"
+
+    if strategy_name in {"kronos_confirm", "kronos_lead"}:
+        if raw_direction == "down" and not KRONOS_NOTIFY_ALLOW_DOWN:
+            return False, "production_blocked;kronos_down_disabled"
+        kronos_confidence = _extract_reason_float(reason, "kronos_conf") or 0.0
+        if kronos_confidence < KRONOS_NOTIFY_MIN_CONFIDENCE:
+            return False, f"production_blocked;kronos_conf_below_{KRONOS_NOTIFY_MIN_CONFIDENCE:.2f}"
+        return True, "production_quality_passed"
+
+    return True, "production_quality_passed"
+
+
+def _parse_beijing_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _to_float(value, default: float | None = None) -> float | None:
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def render_strategy_chart(strategy_name: str):
+    window_rows = _load_strategy_chart_window(strategy_name)
+    if not window_rows:
+        return
+
+    try:
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[realtime_strategy] chart skipped: matplotlib unavailable: {type(exc).__name__}: {exc}")
+        return
+
+    fig, (ax_price, ax_hist) = plt.subplots(
+        2,
+        1,
+        figsize=(12, 7),
+        dpi=120,
+        gridspec_kw={"height_ratios": [3, 1.4]},
+    )
+    ax_conf = ax_price.twinx()
+    _draw_strategy_chart_axes(strategy_name, window_rows, ax_price, ax_conf, mdates)
+    _draw_confidence_accuracy_histogram(strategy_name, ax_hist)
+
+    fig.tight_layout()
+
+    STRATEGY_CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+    chart_path = STRATEGY_CHARTS_DIR / f"{strategy_name}.png"
+    fig.savefig(chart_path)
+    plt.close(fig)
+
+
+def _load_strategy_chart_window(strategy_name: str) -> list[tuple[datetime, float, float, dict]]:
+    csv_path = _strategy_prediction_csv_path(strategy_name)
+    rows = _read_csv_rows(csv_path)
+    parsed_rows = []
+    for row in rows:
+        timestamp = _parse_beijing_time(row.get("timestamp", ""))
+        price = _to_float(row.get("current_price"))
+        confidence = _to_float(row.get("confidence"))
+        if timestamp is None or price is None or confidence is None:
+            continue
+        parsed_rows.append((timestamp, price, confidence, row))
+
+    if not parsed_rows:
+        return []
+
+    parsed_rows.sort(key=lambda item: item[0])
+    latest_time = parsed_rows[-1][0]
+    return _filter_chart_window(parsed_rows, latest_time)
+
+
+def _filter_chart_window(
+    parsed_rows: list[tuple[datetime, float, float, dict]],
+    right_edge: datetime,
+) -> list[tuple[datetime, float, float, dict]]:
+    left_edge = right_edge.timestamp() - 30 * 60
+    right_ts = right_edge.timestamp()
+    return [item for item in parsed_rows if left_edge <= item[0].timestamp() <= right_ts]
+
+
+def _draw_strategy_chart_axes(strategy_name: str, window_rows, ax_price, ax_conf, mdates, right_edge=None):
+    if right_edge is None and window_rows:
+        right_edge = window_rows[-1][0]
+    times = [item[0] for item in window_rows]
+    prices = [item[1] for item in window_rows]
+    confidences = [item[2] for item in window_rows]
+
+    if times:
+        ax_price.plot(times, prices, color="#1f77b4", linewidth=1.8, label="BTC price")
+    ax_price.set_ylabel("BTC price")
+    ax_price.grid(False)
+
+    ax_conf.set_ylim(0.0, 1.0)
+    ax_conf.set_ylabel("confidence")
+    ax_conf.set_yticks([idx / 10 for idx in range(11)])
+    ax_conf.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.35)
+
+    baseline = ax_conf.get_ylim()[0]
+    marker_groups = {
+        ("up", True): {"x": [], "y": [], "colors": []},
+        ("up", False): {"x": [], "y": [], "colors": []},
+        ("down", True): {"x": [], "y": [], "colors": []},
+        ("down", False): {"x": [], "y": [], "colors": []},
+    }
+
+    for timestamp, _, confidence, row in window_rows:
+        color = _prediction_status_color(row)
+        ax_conf.vlines(
+            timestamp,
+            baseline,
+            confidence,
+            colors=color,
+            linestyles="dashed",
+            linewidth=0.8,
+            alpha=0.65,
+        )
+        direction = row.get("raw_direction") if row.get("raw_direction") in {"up", "down"} else "up"
+        is_official = str(row.get("notify_enabled", "")).lower() == "true"
+        marker_groups[(direction, is_official)]["x"].append(timestamp)
+        marker_groups[(direction, is_official)]["y"].append(confidence)
+        marker_groups[(direction, is_official)]["colors"].append(color)
+
+    for (direction, is_official), group in marker_groups.items():
+        if not group["x"]:
+            continue
+        marker = "^" if direction == "up" else "v"
+        if is_official:
+            ax_conf.scatter(
+                group["x"],
+                group["y"],
+                marker=marker,
+                c=group["colors"],
+                s=64,
+                edgecolors="#111827",
+                linewidths=0.45,
+                alpha=0.95,
+                zorder=5,
+            )
+        else:
+            ax_conf.scatter(
+                group["x"],
+                group["y"],
+                marker=marker,
+                facecolors="none",
+                edgecolors=group["colors"],
+                s=64,
+                linewidths=1.3,
+                alpha=0.55,
+                zorder=5,
+            )
+
+    _add_strategy_chart_legend(ax_conf)
+
+    ax_price.set_title(f"{strategy_name} rolling 30m predictions")
+    if right_edge is not None:
+        ax_price.set_xlim(right_edge - timedelta(minutes=30), right_edge)
+    ax_price.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax_price.tick_params(axis="x", rotation=30)
+
+
+def _prediction_status_color(row: dict) -> str:
+    status = row.get("validation_status", "")
+    is_correct = str(row.get("is_correct", "")).lower()
+    if status != "validated":
+        return "#8a8f98"
+    if is_correct == "true":
+        return "#2ca02c"
+    return "#d62728"
+
+
+def _add_strategy_chart_legend(ax_conf):
+    from matplotlib.lines import Line2D
+
+    handles = [
+        Line2D([0], [0], marker="^", color="none", markerfacecolor="#8a8f98", markeredgecolor="#111827", label="official up", markersize=7),
+        Line2D([0], [0], marker="v", color="none", markerfacecolor="#8a8f98", markeredgecolor="#111827", label="official down", markersize=7),
+        Line2D([0], [0], marker="^", color="none", markerfacecolor="none", markeredgecolor="#8a8f98", label="observe up", markersize=7),
+        Line2D([0], [0], marker="v", color="none", markerfacecolor="none", markeredgecolor="#8a8f98", label="observe down", markersize=7),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#2ca02c", markeredgecolor="#2ca02c", label="correct", markersize=6),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#d62728", markeredgecolor="#d62728", label="wrong", markersize=6),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="#8a8f98", markeredgecolor="#8a8f98", label="pending", markersize=6),
+    ]
+    ax_conf.legend(handles=handles, loc="upper left", fontsize=8, ncols=2, framealpha=0.85)
+
+
+def _confidence_accuracy_bins(strategy_name: str, bin_width: float = 0.1):
+    rows = _read_csv_rows(_strategy_prediction_csv_path(strategy_name))
+    bin_count = int(1.0 / bin_width)
+    stats = [{"total": 0, "correct": 0} for _ in range(bin_count)]
+
+    for row in rows:
+        if row.get("validation_status") != "validated":
+            continue
+        if str(row.get("notify_enabled", "")).lower() != "true":
+            continue
+        confidence = _to_float(row.get("confidence"))
+        if confidence is None:
+            continue
+        idx = min(bin_count - 1, max(0, int(confidence / bin_width)))
+        stats[idx]["total"] += 1
+        if str(row.get("is_correct", "")).lower() == "true":
+            stats[idx]["correct"] += 1
+
+    labels = []
+    accuracies = []
+    totals = []
+    for idx, item in enumerate(stats):
+        left = idx * bin_width
+        right = left + bin_width
+        labels.append(f"{left:.1f}-{right:.1f}")
+        totals.append(item["total"])
+        if item["total"]:
+            accuracies.append(item["correct"] / item["total"])
+        else:
+            accuracies.append(0.0)
+    return labels, accuracies, totals
+
+
+def _draw_confidence_accuracy_histogram(strategy_name: str, ax_hist):
+    labels, accuracies, totals = _confidence_accuracy_bins(strategy_name)
+    positions = list(range(len(labels)))
+    colors = ["#2ca02c" if total else "#c7cbd1" for total in totals]
+
+    ax_hist.bar(positions, accuracies, color=colors, width=0.82)
+    ax_hist.set_ylim(0.0, 1.0)
+    ax_hist.set_ylabel("accuracy")
+    ax_hist.set_xlabel("confidence bin")
+    ax_hist.set_title(f"{strategy_name} notified signal accuracy by confidence")
+    ax_hist.set_xticks(positions)
+    ax_hist.set_xticklabels(labels, rotation=35, ha="right")
+    ax_hist.grid(True, axis="y", linestyle="--", linewidth=0.5, alpha=0.35)
+
+    for idx, (accuracy, total) in enumerate(zip(accuracies, totals)):
+        if total:
+            ax_hist.text(idx, min(accuracy + 0.03, 0.98), f"{accuracy:.0%}\n{total}", ha="center", va="bottom", fontsize=8)
+        else:
+            ax_hist.text(idx, 0.03, "0", ha="center", va="bottom", fontsize=8, color="#6b7280")
+
+
+def render_strategy_charts(strategy_names: list[str]):
+    for strategy_name in strategy_names:
+        render_strategy_chart(strategy_name)
+
+
+class LiveStrategyChartWindow:
+    def __init__(self, strategy_names: list[str]):
+        self.strategy_names = strategy_names
+        self.enabled = False
+        self.plt = None
+        self.mdates = None
+        self.windows = {}
+
+    def start(self):
+        try:
+            import matplotlib.dates as mdates
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            print(f"[realtime_strategy] live chart disabled: matplotlib unavailable: {type(exc).__name__}: {exc}")
+            return
+
+        self.plt = plt
+        self.mdates = mdates
+        plt.ion()
+
+        for strategy_name in self.strategy_names:
+            fig, (ax_price, ax_hist) = plt.subplots(
+                2,
+                1,
+                figsize=(12, 7),
+                gridspec_kw={"height_ratios": [3, 1.4]},
+            )
+            manager = getattr(fig.canvas, "manager", None)
+            if manager is not None and hasattr(manager, "set_window_title"):
+                manager.set_window_title(f"ShortTermTrendPredictor - {strategy_name}")
+            ax_conf = ax_price.twinx()
+            self.windows[strategy_name] = {
+                "fig": fig,
+                "ax_price": ax_price,
+                "ax_conf": ax_conf,
+                "ax_hist": ax_hist,
+            }
+
+        self.enabled = True
+        self.update()
+
+    def update(self):
+        if not self.enabled:
+            return
+
+        latest_time = self._latest_time()
+        if latest_time is None:
+            latest_time = datetime.now()
+
+        for strategy_name in self.strategy_names:
+            window = self.windows[strategy_name]
+            fig = window["fig"]
+            ax_price = window["ax_price"]
+            ax_conf = window["ax_conf"]
+            ax_hist = window["ax_hist"]
+            ax_price.clear()
+            ax_conf.clear()
+            ax_hist.clear()
+            rows = self._load_window_for_right_edge(strategy_name, latest_time)
+            _draw_strategy_chart_axes(
+                strategy_name,
+                rows,
+                ax_price,
+                ax_conf,
+                self.mdates,
+                right_edge=latest_time,
+            )
+            _draw_confidence_accuracy_histogram(strategy_name, ax_hist)
+            fig.tight_layout()
+            fig.canvas.draw_idle()
+
+        self.plt.pause(0.001)
+
+    def _latest_time(self) -> datetime | None:
+        latest = None
+        for strategy_name in self.strategy_names:
+            rows = _read_csv_rows(_strategy_prediction_csv_path(strategy_name))
+            for row in rows:
+                timestamp = _parse_beijing_time(row.get("timestamp", ""))
+                if timestamp is not None and (latest is None or timestamp > latest):
+                    latest = timestamp
+        return latest
+
+    def _load_window_for_right_edge(self, strategy_name: str, right_edge: datetime):
+        rows = _read_csv_rows(_strategy_prediction_csv_path(strategy_name))
+        parsed_rows = []
+        for row in rows:
+            timestamp = _parse_beijing_time(row.get("timestamp", ""))
+            price = _to_float(row.get("current_price"))
+            confidence = _to_float(row.get("confidence"))
+            if timestamp is None or price is None or confidence is None:
+                continue
+            parsed_rows.append((timestamp, price, confidence, row))
+        parsed_rows.sort(key=lambda item: item[0])
+        return _filter_chart_window(parsed_rows, right_edge)
+
+
 def validate_due_signals(df, now_ms: int):
     pending = load_pending_signals()
     if not pending:
@@ -218,6 +707,7 @@ def validate_due_signals(df, now_ms: int):
 
     close_by_timestamp = df.set_index("timestamp")["close"]
     remaining = []
+    validated_strategy_names = set()
 
     for row in pending:
         validation_timestamp = int(row["validation_timestamp"])
@@ -231,7 +721,8 @@ def validate_due_signals(df, now_ms: int):
         signal_price = float(row["signal_price"])
         validation_price = float(close_by_timestamp.loc[validation_timestamp])
         actual_direction = "up" if validation_price > signal_price else "down"
-        predicted_direction = row["direction"]
+        predicted_direction = row.get("raw_direction") or row.get("direction")
+        final_direction = row.get("final_direction") or row.get("direction")
         is_correct = predicted_direction == actual_direction
         validation_time = ms_to_beijing_time(validation_timestamp)
         strategy_accuracy, strategy_correct_count, strategy_total_count = _strategy_accuracy_after_current(
@@ -239,22 +730,28 @@ def validate_due_signals(df, now_ms: int):
             is_correct,
         )
 
-        validation_row = {
-            "prediction_id": row["prediction_id"],
-            "strategy": row["strategy"],
-            "predicted_direction": predicted_direction,
-            "actual_direction": actual_direction,
-            "correct": is_correct,
-            "signal_time": row["signal_time"],
-            "validation_time": validation_time,
-            "signal_price": signal_price,
-            "validation_price": validation_price,
-            "confidence": row["confidence"],
-            "up_signal_probability": row.get("up_signal_probability"),
-            "down_signal_probability": row.get("down_signal_probability"),
-            "direction_edge": row.get("direction_edge"),
-        }
-        append_validated_signal(validation_row)
+        if final_direction in {"up", "down"}:
+            validation_row = {
+                "prediction_id": row["prediction_id"],
+                "strategy": row["strategy"],
+                "predicted_direction": predicted_direction,
+                "actual_direction": actual_direction,
+                "correct": is_correct,
+                "signal_time": row["signal_time"],
+                "validation_time": validation_time,
+                "signal_price": signal_price,
+                "validation_price": validation_price,
+                "confidence": row["confidence"],
+                "up_signal_probability": row.get("up_signal_probability"),
+                "down_signal_probability": row.get("down_signal_probability"),
+                "direction_edge": row.get("direction_edge"),
+                "feature_signature": row.get("feature_signature"),
+                "learning_state": row.get("learning_state"),
+                "learning_reason": row.get("learning_reason"),
+            }
+            append_validated_signal(validation_row)
+            build_learning_state(VALIDATED_STRATEGY_SIGNALS)
+
         append_prediction_csv(
             {
                 "prediction_id": row["prediction_id"],
@@ -274,7 +771,32 @@ def validate_due_signals(df, now_ms: int):
                 "is_correct": is_correct,
             }
         )
-        notify_enabled = str(row.get("notify_enabled", "")).lower() == "true" or is_official_signal_strategy(row["strategy"])
+
+        upsert_per_strategy_prediction(
+            row["strategy"],
+            {
+                "prediction_id": row["prediction_id"],
+                "timestamp": row["signal_time"],
+                "strategy": row["strategy"],
+                "current_price": signal_price,
+                "raw_direction": predicted_direction,
+                "final_direction": final_direction,
+                "confidence": row["confidence"],
+                "reason": row.get("reason"),
+                "up_signal_probability": row.get("up_signal_probability"),
+                "down_signal_probability": row.get("down_signal_probability"),
+                "direction_edge": row.get("direction_edge"),
+                "validation_timestamp": validation_time,
+                "validation_status": "validated",
+                "actual_direction": actual_direction,
+                "future_price": validation_price,
+                "is_correct": is_correct,
+                "notify_enabled": row.get("notify_enabled"),
+            },
+        )
+        validated_strategy_names.add(row["strategy"])
+
+        notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
         if notify_enabled:
             send_validation_signal(
                 strategy_name=row["strategy"],
@@ -305,25 +827,68 @@ def validate_due_signals(df, now_ms: int):
         )
 
     save_pending_signals(remaining)
+    render_strategy_charts(sorted(validated_strategy_names))
 
 
-def register_prediction_signal(strategy_name: str, decision, prediction: dict, current_price: float, signal_timestamp: int, signal_time: str):
+def register_prediction_signal(
+    strategy_name: str,
+    decision,
+    prediction: dict,
+    current_price: float,
+    signal_timestamp: int,
+    signal_time: str,
+    features,
+    quality_context: dict | None = None,
+):
     prediction_id = f"{strategy_name}-{signal_timestamp}"
     validation_timestamp = signal_timestamp + PREDICT_HORIZON_MINUTES * 60_000
     validation_time = ms_to_beijing_time(validation_timestamp)
 
-    pending = load_pending_signals()
-    if any(row.get("prediction_id") == prediction_id for row in pending):
-        return
+    p_up = float(prediction.get("up_signal_probability", 0.0))
+    p_down = float(prediction.get("down_signal_probability", 0.0))
+    raw_direction = decision.direction if decision.direction in {"up", "down"} else ("up" if p_up >= p_down else "down")
+    final_direction = decision.direction
 
-    notify_enabled = is_official_signal_strategy(strategy_name)
+    learning = learning_decision(
+        VALIDATED_STRATEGY_SIGNALS,
+        strategy_name,
+        raw_direction,
+        features,
+    )
+    reason = f"{decision.reason};{learning.reason}"
+    quality_ok, quality_reason = passes_production_quality_gate(
+        strategy_name=strategy_name,
+        raw_direction=raw_direction,
+        confidence=float(decision.confidence),
+        prediction=prediction,
+        reason=reason,
+        quality_context=quality_context,
+    )
+    notify_enabled = (
+        final_direction in {"up", "down"}
+        and is_official_signal_strategy(strategy_name)
+        and learning.notify
+        and quality_ok
+    )
+    reason = f"{reason};{quality_reason}"
+    skip_reasons = []
+    if final_direction not in {"up", "down"}:
+        skip_reasons.append(f"final_direction={final_direction}")
+    if not is_official_signal_strategy(strategy_name):
+        skip_reasons.append("not_official_strategy")
+    if not learning.notify:
+        skip_reasons.append(f"learning={learning.state}")
+    if not quality_ok:
+        skip_reasons.append(f"quality={quality_reason}")
 
     row = {
         "prediction_id": prediction_id,
         "strategy": strategy_name,
-        "direction": decision.direction,
+        "direction": raw_direction,
+        "raw_direction": raw_direction,
+        "final_direction": final_direction,
         "confidence": float(decision.confidence),
-        "reason": decision.reason,
+        "reason": reason,
         "signal_price": float(current_price),
         "signal_timestamp": int(signal_timestamp),
         "signal_time": signal_time,
@@ -332,9 +897,50 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
         "down_signal_probability": prediction.get("down_signal_probability"),
         "direction_edge": prediction.get("direction_edge"),
         "notify_enabled": notify_enabled,
+        "feature_signature": feature_signature(features),
+        "learning_state": learning.state,
+        "learning_reason": learning.reason,
     }
-    pending.append(row)
-    save_pending_signals(pending)
+
+    upsert_per_strategy_prediction(
+        strategy_name,
+        {
+            "prediction_id": prediction_id,
+            "timestamp": signal_time,
+            "strategy": strategy_name,
+            "current_price": float(current_price),
+            "raw_direction": raw_direction,
+            "final_direction": final_direction,
+            "confidence": float(decision.confidence),
+            "reason": reason,
+            "up_signal_probability": prediction.get("up_signal_probability"),
+            "down_signal_probability": prediction.get("down_signal_probability"),
+            "direction_edge": prediction.get("direction_edge"),
+            "validation_timestamp": validation_time,
+            "validation_status": "pending",
+            "actual_direction": "",
+            "future_price": "",
+            "is_correct": "",
+            "notify_enabled": notify_enabled,
+        },
+    )
+
+    pending = load_pending_signals()
+    already_pending = False
+    next_pending = []
+    for pending_row in pending:
+        if pending_row.get("prediction_id") == prediction_id:
+            next_pending.append(row)
+            already_pending = True
+        else:
+            next_pending.append(pending_row)
+    if already_pending:
+        save_pending_signals(next_pending)
+        print(f"[realtime_strategy] prediction already pending, per-strategy row refreshed: {prediction_id}")
+        return
+
+    next_pending.append(row)
+    save_pending_signals(next_pending)
 
     append_prediction_csv(
         {
@@ -342,9 +948,9 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
             "timestamp": signal_time,
             "strategy": strategy_name,
             "current_price": float(current_price),
-            "predicted_direction": decision.direction,
+            "predicted_direction": raw_direction,
             "confidence": float(decision.confidence),
-            "reason": decision.reason,
+            "reason": reason,
             "up_signal_probability": prediction.get("up_signal_probability"),
             "down_signal_probability": prediction.get("down_signal_probability"),
             "direction_edge": prediction.get("direction_edge"),
@@ -359,11 +965,11 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
     if notify_enabled:
         send_prediction_signal(
             strategy_name=strategy_name,
-            direction=decision.direction,
+            direction=raw_direction,
             confidence=float(decision.confidence),
             current_price=float(current_price),
             timestamp=signal_time,
-            reason=decision.reason,
+            reason=reason,
             prediction_id=prediction_id,
             up_signal_probability=prediction.get("up_signal_probability"),
             down_signal_probability=prediction.get("down_signal_probability"),
@@ -371,14 +977,78 @@ def register_prediction_signal(strategy_name: str, decision, prediction: dict, c
             horizon_minutes=PREDICT_HORIZON_MINUTES,
         )
     else:
-        print(f"[realtime_strategy] prediction notification skipped for observation strategy={strategy_name}")
+        print(
+            "[realtime_strategy] prediction notification skipped: "
+            f"strategy={strategy_name}, reason={';'.join(skip_reasons) or 'unknown'}, "
+            f"learning_reason={learning.reason}"
+        )
 
 
 def _refresh_historical_match_rows(df, feature_df, model):
     historical_feature_df = feature_df.iloc[:-PREDICT_HORIZON_MINUTES].copy()
+    source_end_ms = int(df.iloc[-1]["timestamp"]) if not df.empty else 0
+    cache_payload = _load_historical_match_cache(source_end_ms)
+    if cache_payload is not None:
+        rows = cache_payload["rows"]
+        cache_time = ms_to_beijing_time(int(cache_payload["source_end_ms"]))
+        stale_note = " stale_cache" if cache_payload.get("stale") else ""
+        print(
+            "[realtime_strategy] walk_forward_historical_match_rows="
+            f"{len(rows)} loaded_from_cache{stale_note} source_end={cache_time}"
+        )
+        return rows
+
     rows = build_walk_forward_historical_match_rows(historical_feature_df, df)
+    _save_historical_match_cache(rows, source_end_ms)
     print(f"[realtime_strategy] walk_forward_historical_match_rows={len(rows)}")
     return rows
+
+
+def _load_historical_match_cache(current_source_end_ms: int) -> dict | None:
+    if not HISTORICAL_MATCH_CACHE_FILE.exists() or HISTORICAL_MATCH_CACHE_FILE.stat().st_size == 0:
+        return None
+    try:
+        with open(HISTORICAL_MATCH_CACHE_FILE, "rb") as f:
+            payload = pickle.load(f)
+    except Exception as exc:
+        print(f"[realtime_strategy] historical match cache ignored: {type(exc).__name__}: {exc}")
+        return None
+
+    rows = payload.get("rows")
+    source_end_ms = int(payload.get("source_end_ms", 0))
+    model_update_minutes = int(payload.get("model_update_minutes", 0))
+    if rows is None or source_end_ms <= 0:
+        return None
+    if model_update_minutes != HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES:
+        return None
+    max_age_ms = int(HISTORICAL_MATCH_CACHE_MAX_AGE_MINUTES) * 60_000
+    cache_age_ms = current_source_end_ms - source_end_ms
+    if cache_age_ms > max_age_ms:
+        stale_max_ms = int(HISTORICAL_MATCH_CACHE_STALE_MAX_HOURS) * 60 * 60_000
+        if cache_age_ms <= stale_max_ms:
+            payload["stale"] = True
+            return payload
+        return None
+    payload["stale"] = False
+    return payload
+
+
+def _save_historical_match_cache(rows, source_end_ms: int):
+    payload = {
+        "source_end_ms": int(source_end_ms),
+        "model_update_minutes": int(HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES),
+        "rows": rows,
+    }
+    try:
+        HISTORICAL_MATCH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = HISTORICAL_MATCH_CACHE_FILE.with_name(
+            f".{HISTORICAL_MATCH_CACHE_FILE.name}.{os.getpid()}.tmp"
+        )
+        with open(tmp_path, "wb") as f:
+            pickle.dump(payload, f)
+        tmp_path.replace(HISTORICAL_MATCH_CACHE_FILE)
+    except Exception as exc:
+        print(f"[realtime_strategy] historical match cache save skipped: {type(exc).__name__}: {exc}")
 
 
 def _update_historical_strategy_context(strategies: list, historical_rows):
@@ -393,14 +1063,48 @@ def _update_kronos_strategy_context(strategies: list, kronos_result):
             strategy.update_kronos_result(kronos_result)
 
 
+def _skipped_kronos_result(reason: str) -> KronosForecastResult:
+    return KronosForecastResult(False, "no_trade", 0.0, None, None, reason)
+
+
+def _should_run_kronos(prediction: dict) -> tuple[bool, str]:
+    p_up = float(prediction.get("up_signal_probability", 0.0))
+    p_down = float(prediction.get("down_signal_probability", 0.0))
+    edge = abs(float(prediction.get("direction_edge", 0.0)))
+    confidence = max(p_up, p_down)
+    if edge < KRONOS_RUN_MIN_EDGE:
+        return False, f"kronos_skipped_edge_below_{KRONOS_RUN_MIN_EDGE:.2f}"
+    if confidence < KRONOS_RUN_MIN_CONFIDENCE:
+        return False, f"kronos_skipped_confidence_below_{KRONOS_RUN_MIN_CONFIDENCE:.2f}"
+    return True, "kronos_run_candidate"
+
+
+def _build_quality_context(strategy_decisions: list[tuple[str, object]]) -> dict:
+    confirmations = {"up": False, "down": False}
+    for strategy_name, decision in strategy_decisions:
+        direction = getattr(decision, "direction", "no_trade")
+        if direction not in {"up", "down"}:
+            continue
+        reason = getattr(decision, "reason", "")
+        if strategy_name in {"historical_match", "historical_match_long", "historical_match_short"}:
+            confirmations[direction] = True
+        elif strategy_name in {"kronos_confirm", "kronos_lead"}:
+            kronos_confidence = _extract_reason_float(reason, "kronos_conf") or 0.0
+            if kronos_confidence >= KRONOS_NOTIFY_MIN_CONFIDENCE:
+                confirmations[direction] = True
+    return {"confirmations": confirmations}
+
+
 def run_realtime_strategies(
     strategy_names: str = "short_momentum,relaxed_scenario,historical_match,kronos_confirm,finstar_scenario",
     train_minutes: int = 48 * 60,
     once: bool = False,
+    update_cache: bool = True,
+    live_chart: bool = False,
 ):
     names = parse_strategy_names(strategy_names)
     strategies = [STRATEGY_MAP[name]() for name in names]
-    use_kronos = "kronos_confirm" in names
+    use_kronos = any(name in {"kronos_confirm", "kronos_lead"} for name in names)
     kronos_adapter = KronosAdapter() if use_kronos else None
 
     print("[realtime_strategy] start")
@@ -414,12 +1118,17 @@ def run_realtime_strategies(
     rebuild_latest_predictions_from_log()
 
     model = load_model()
-    last_train_time = None
+    if model is not None:
+        print("[realtime_strategy] loaded saved model; startup retrain deferred until next interval")
+    last_train_time = datetime.now() if model is not None else None
     historical_rows = None
+    live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
+    if live_chart_window is not None:
+        live_chart_window.start()
 
     while True:
         try:
-            df = get_recent_klines_with_cache(minutes=train_minutes, update_if_needed=True)
+            df = get_recent_klines_with_cache(minutes=train_minutes, update_if_needed=update_cache)
             if df.empty:
                 print("[realtime_strategy] empty data")
                 if once:
@@ -429,6 +1138,8 @@ def run_realtime_strategies(
 
             now_ms = int(df.iloc[-1]["timestamp"])
             validate_due_signals(df, now_ms)
+            if live_chart_window is not None:
+                live_chart_window.update()
 
             need_train = model is None
             if last_train_time is None:
@@ -456,16 +1167,6 @@ def run_realtime_strategies(
                 historical_rows = _refresh_historical_match_rows(df, feature_df, model)
                 _update_historical_strategy_context(strategies, historical_rows)
 
-            if kronos_adapter is not None:
-                kronos_result = kronos_adapter.forecast_direction(df)
-                _update_kronos_strategy_context(strategies, kronos_result)
-                print(
-                    "[realtime_strategy] kronos output: "
-                    f"available={kronos_result.available}, direction={kronos_result.direction}, "
-                    f"confidence={kronos_result.confidence:.4f}, "
-                    f"forecast_close={kronos_result.forecast_close}, reason={kronos_result.reason}"
-                )
-
             latest = feature_df.iloc[[-1]].copy()
             latest_features = latest[model.feature_cols]
             feature_row = latest.iloc[0]
@@ -483,8 +1184,24 @@ def run_realtime_strategies(
                 f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
             )
 
+            if kronos_adapter is not None:
+                should_run_kronos, kronos_skip_reason = _should_run_kronos(prediction)
+                if should_run_kronos:
+                    kronos_result = kronos_adapter.forecast_direction(df)
+                else:
+                    kronos_result = _skipped_kronos_result(kronos_skip_reason)
+                _update_kronos_strategy_context(strategies, kronos_result)
+                print(
+                    "[realtime_strategy] kronos output: "
+                    f"available={kronos_result.available}, direction={kronos_result.direction}, "
+                    f"confidence={kronos_result.confidence:.4f}, "
+                    f"forecast_close={kronos_result.forecast_close}, reason={kronos_result.reason}"
+                )
+
+            strategy_decisions = []
             for strategy in strategies:
                 decision = strategy.decide(feature_row, prediction)
+                strategy_decisions.append((strategy.name, decision))
                 print(
                     "[realtime_strategy] strategy decision: "
                     f"strategy={strategy.name}, direction={decision.direction}, "
@@ -493,17 +1210,27 @@ def run_realtime_strategies(
                     f"down_model={prediction.get('down_signal_probability'):.4f}, "
                     f"edge={prediction.get('direction_edge'):.4f}"
                 )
-                if decision.direction in {"up", "down"}:
-                    register_prediction_signal(
-                        strategy_name=strategy.name,
-                        decision=decision,
-                        prediction=prediction,
-                        current_price=current_price,
-                        signal_timestamp=signal_timestamp,
-                        signal_time=signal_time,
-                    )
+
+            quality_context = _build_quality_context(strategy_decisions)
+            for strategy_name, decision in strategy_decisions:
+                register_prediction_signal(
+                    strategy_name=strategy_name,
+                    decision=decision,
+                    prediction=prediction,
+                    current_price=current_price,
+                    signal_timestamp=signal_timestamp,
+                    signal_time=signal_time,
+                    features=feature_row,
+                    quality_context=quality_context,
+                )
+
+            render_strategy_charts(names)
+            if live_chart_window is not None:
+                live_chart_window.update()
 
             if once:
+                if live_chart_window is not None:
+                    input("[realtime_strategy] live chart is open. Press Enter to exit...")
                 return
 
         except KeyboardInterrupt:

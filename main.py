@@ -73,7 +73,14 @@ def run_realtime():
     realtime_loop()
 
 
-def run_realtime_strategies(strategy_names: str | None = None, observe_all: bool = False):
+def run_realtime_strategies(
+    strategy_names: str | None = None,
+    observe_all: bool = False,
+    train_minutes: int = 48 * 60,
+    once: bool = False,
+    no_update_cache: bool = False,
+    live_chart: bool = False,
+):
     """
     启动多策略实时预测。默认只运行当前正式高胜率策略。
     """
@@ -81,7 +88,13 @@ def run_realtime_strategies(strategy_names: str | None = None, observe_all: bool
     from realtime_strategy_runner import run_realtime_strategies as run_strategy_loop
 
     selected = OBSERVATION_STRATEGIES if observe_all else strategy_names or DEFAULT_STRATEGIES
-    run_strategy_loop(strategy_names=selected)
+    run_strategy_loop(
+        strategy_names=selected,
+        train_minutes=train_minutes,
+        once=once,
+        update_cache=not no_update_cache,
+        live_chart=live_chart,
+    )
 
 
 def run_tune_dual_model(
@@ -351,6 +364,25 @@ def main():
         help="realtime_strategies 模式下运行全部策略做观察。",
     )
 
+    parser.add_argument(
+        "--train-minutes",
+        type=int,
+        default=48 * 60,
+        help="realtime_strategies 模式下用于训练和历史匹配的最近分钟数。",
+    )
+
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="realtime_strategies 模式下只运行一轮预测和验证。",
+    )
+
+    parser.add_argument(
+        "--live-chart",
+        action="store_true",
+        help="realtime_strategies 模式下打开 matplotlib 实时滚动图表窗口。",
+    )
+
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -360,7 +392,14 @@ def main():
         run_realtime()
 
     elif args.mode == "realtime_strategies":
-        run_realtime_strategies(strategy_names=args.strategies, observe_all=args.observe_all)
+        run_realtime_strategies(
+            strategy_names=args.strategies,
+            observe_all=args.observe_all,
+            train_minutes=args.train_minutes,
+            once=args.once,
+            no_update_cache=args.no_update_cache,
+            live_chart=args.live_chart,
+        )
 
     elif args.mode == "training_backtest":
         run_training_backtest(no_update_cache=args.no_update_cache)

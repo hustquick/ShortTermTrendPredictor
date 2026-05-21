@@ -111,9 +111,17 @@ python3 main.py --mode realtime_strategies
 python3 main.py --mode realtime_strategies --observe-all
 ```
 
+前台运行并打开 matplotlib 实时滚动图表窗口：
+
+```bash
+python3 main.py --mode realtime_strategies --observe-all --live-chart
+```
+
+系统会为每个策略打开一个独立图表窗口。每个窗口上方是最近 30 分钟滚动双 Y 轴图，横轴右侧固定为最新预测时间，左轴为 BTC 价格，右轴为置信度；灰色三角形表示未验证，绿色表示验证正确，红色表示验证错误。窗口下方是按置信度区间分桶的已验证准确率直方图。
+
 `finstar_scenario` 已收紧为必须通过历史相似样本验证才允许出信号，避免只凭高模型置信度放行低质量场景信号。
 
-企业微信通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前所有实时策略都在白名单内；使用 `--observe-all` 运行时，任意策略产生 up/down 信号都会推送企业微信预测通知，并在 10 分钟后推送验证通知。
+企业微信通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前生产白名单包含 `historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive 和 Kronos 还必须通过额外生产质量门槛，未通过时继续记录和验证但不推送企业微信。
 
 历史相似样本匹配使用 walk-forward 样本外概率池：每个历史样本只使用该时间桶之前的数据训练出来的模型概率，避免当前模型回头给整段历史打分造成 `success_rate=1.0000` 的乐观偏差。历史池默认每 120 分钟重训一次以控制实时启动耗时，实时主模型仍按原配置重训。
 
@@ -121,6 +129,14 @@ python3 main.py --mode realtime_strategies --observe-all
 
 - short 拒绝反弹陷阱：`ret_10 > 0 且 macd_hist > 0`、`ret_30 > 0 且 macd_hist > 0`、`close_position < 0.02`、`close_position > 0.98 且 ret_10 > 0`、或 `rsi_14 < 45 且 boll_position <= 0.15`。
 - long 拒绝追高陷阱：`rsi_14 > 80`、`boll_position > 0.84`、或 `close_position > 0.98`。
+
+实时策略包含自学习门控：系统会按 `strategy + direction` 统计最近验证结果，生成 `data/strategy_learning_state.json`。当前正式通知必须同时满足生产白名单、滚动样本不少于 10 条、胜率达到 70% 且状态为 active；`explore`、`probation`、`disabled` 方向都会继续记录和验证，但不再推送企业微信。Kronos 正式通知还要求 `kronos_conf >= 0.12`，且当前禁用 Kronos 做空通知；adaptive 正式通知要求 `confidence >= 0.80`、`abs(edge) >= 0.50`，并且同方向必须有历史匹配或高置信 Kronos 二次确认。
+
+启动性能优化：
+
+- 如果 `models/dual_backtest_ensemble_model.pkl` 已存在，实时策略启动会先复用本地模型，首轮重训延后到下一次 30 分钟重训周期。
+- 历史匹配 walk-forward 样本池会缓存到 `data/historical_match_walk_forward_cache.pkl`，30 分钟内重启会直接复用缓存，避免重复多桶训练。
+- Kronos 只在双子模型存在足够方向候选时运行；低 edge 或低模型置信时直接跳过，避免每轮无效加载/预测。
 
 如果网络无法访问币安，可先把 `data/BTCUSDT_1m_history.csv` 放入本地，并在严格回测时使用：
 

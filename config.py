@@ -26,6 +26,8 @@ MODEL_FILE = MODEL_DIR / "dual_backtest_ensemble_model.pkl"
 DUAL_MODEL_PARAMS_FILE = MODEL_DIR / "dual_model_params.json"
 DUAL_MODEL_TUNING_REPORT_CSV = DATA_DIR / "dual_model_tuning_report.csv"
 STRICT_PARAM_SEARCH_CSV = DATA_DIR / "strict_param_search_report.csv"
+STRATEGY_LEARNING_STATE_FILE = DATA_DIR / "strategy_learning_state.json"
+HISTORICAL_MATCH_CACHE_FILE = DATA_DIR / "historical_match_walk_forward_cache.pkl"
 
 # =========================
 # 币安数据配置
@@ -146,15 +148,15 @@ RETRAIN_INTERVAL_SECONDS = 30 * 60
 
 # 企业微信通知白名单。列入的策略产生 up/down 信号时会推送预测和验证通知。
 OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = (
-    "short_momentum",
-    "relaxed_scenario",
+    "adaptive_dual",
     "historical_match",
-    "historical_match_long",
     "historical_match_short",
     "kronos_confirm",
-    "finstar_scenario",
+    "kronos_lead",
 )
 HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES = 120
+HISTORICAL_MATCH_CACHE_MAX_AGE_MINUTES = 30
+HISTORICAL_MATCH_CACHE_STALE_MAX_HOURS = 24
 
 # Kronos 可选确认模型。默认只使用本地 Hugging Face 缓存，避免实时循环临时下载卡住。
 KRONOS_MODEL_NAME = "NeoQuasar/Kronos-small"
@@ -166,6 +168,30 @@ KRONOS_MAX_CONTEXT = 128
 KRONOS_LOAD_TIMEOUT_SECONDS = 30
 KRONOS_PREDICT_TIMEOUT_SECONDS = 45
 KRONOS_USE_SUBPROCESS = True
+KRONOS_RUN_MIN_EDGE = 0.12
+KRONOS_RUN_MIN_CONFIDENCE = 0.20
+
+# =========================
+# 策略自学习配置
+# =========================
+
+ENABLE_STRATEGY_SELF_LEARNING = True
+STRATEGY_LEARNING_ROLLING_WINDOW = 30
+STRATEGY_LEARNING_MIN_SAMPLES = 10
+STRATEGY_LEARNING_DISABLE_WIN_RATE = 0.55
+STRATEGY_LEARNING_ENABLE_WIN_RATE = 0.70
+STRATEGY_LEARNING_FEATURE_BLOCK_MIN_ERRORS = 2
+ADAPTIVE_DUAL_MIN_EDGE = 0.18
+ADAPTIVE_DUAL_MIN_CONFIDENCE = 0.20
+KRONOS_LEAD_MIN_CONFIDENCE = 0.003
+KRONOS_LEAD_MAX_OPPOSITE_EDGE = 0.25
+
+# 正式通知质量门槛。策略仍可继续记录和验证，但只有满足这些条件才会推送。
+ADAPTIVE_NOTIFY_MIN_CONFIDENCE = 0.55
+ADAPTIVE_NOTIFY_MIN_EDGE = 0.35
+ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION = True
+KRONOS_NOTIFY_MIN_CONFIDENCE = 0.003
+KRONOS_NOTIFY_ALLOW_DOWN = False
 
 # =========================
 # 严格回测配置

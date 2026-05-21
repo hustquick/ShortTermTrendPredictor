@@ -11,11 +11,13 @@ DEFAULT_STRATEGIES = (
 
 OBSERVATION_STRATEGIES = (
     "short_momentum,"
+    "adaptive_dual,"
     "relaxed_scenario,"
     "historical_match,"
     "historical_match_long,"
     "historical_match_short,"
     "kronos_confirm,"
+    "kronos_lead,"
     "finstar_scenario"
 )
 
@@ -44,6 +46,16 @@ def main():
         action="store_true",
         help="Run one prediction and validation cycle, then exit.",
     )
+    parser.add_argument(
+        "--no-update-cache",
+        action="store_true",
+        help="Use local cached klines only and do not fetch missing realtime data.",
+    )
+    parser.add_argument(
+        "--live-chart",
+        action="store_true",
+        help="Open a live matplotlib rolling 30-minute strategy chart window.",
+    )
     args = parser.parse_args()
     strategy_names = OBSERVATION_STRATEGIES if args.observe_all else args.strategies
 
@@ -51,6 +63,8 @@ def main():
         strategy_names=strategy_names,
         train_minutes=args.train_minutes,
         once=args.once,
+        update_cache=not args.no_update_cache,
+        live_chart=args.live_chart,
     )
 
 

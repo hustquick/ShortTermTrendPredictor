@@ -2,7 +2,14 @@
 
 import pandas as pd
 
-from config import LONG_SIGNAL_THRESHOLD, SHORT_SIGNAL_THRESHOLD
+from config import (
+    ADAPTIVE_DUAL_MIN_CONFIDENCE,
+    ADAPTIVE_DUAL_MIN_EDGE,
+    KRONOS_LEAD_MAX_OPPOSITE_EDGE,
+    KRONOS_LEAD_MIN_CONFIDENCE,
+    LONG_SIGNAL_THRESHOLD,
+    SHORT_SIGNAL_THRESHOLD,
+)
 from finstar_scenario_layer import evaluate_finstar_scenario
 from high_win_rate_filter import passes_high_win_rate_filter
 from historical_match_filter import evaluate_historical_match
@@ -165,6 +172,23 @@ class ConservativeExtremeStrategy:
                 return rejected
             return StrategyDecision("down", p_down, "extreme_down_confidence")
         return StrategyDecision("no_trade", max(p_up, p_down), "not_extreme")
+
+
+class AdaptiveDualStrategy:
+    name = "adaptive_dual"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        p_up = float(prediction.get("up_signal_probability", 0.0))
+        p_down = float(prediction.get("down_signal_probability", 0.0))
+        edge = float(prediction.get("direction_edge", 0.0))
+        confidence = max(p_up, p_down)
+        if confidence < ADAPTIVE_DUAL_MIN_CONFIDENCE or abs(edge) < ADAPTIVE_DUAL_MIN_EDGE:
+            return StrategyDecision("no_trade", confidence, "adaptive_dual_low_confidence_or_edge")
+        direction = "up" if edge > 0 else "down"
+        rejected = _reject_trap(features, direction, confidence)
+        if rejected is not None:
+            return rejected
+        return StrategyDecision(direction, confidence, "adaptive_dual_edge_signal")
 
 
 class RelaxedScenarioStrategy:
@@ -391,6 +415,43 @@ class KronosConfirmStrategy:
         )
 
 
+class KronosLeadStrategy:
+    name = "kronos_lead"
+
+    def __init__(self):
+        self.kronos_result = None
+
+    def update_kronos_result(self, kronos_result):
+        self.kronos_result = kronos_result
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        p_up = float(prediction.get("up_signal_probability", 0.0))
+        p_down = float(prediction.get("down_signal_probability", 0.0))
+        edge = float(prediction.get("direction_edge", 0.0))
+        confidence = max(p_up, p_down)
+        if self.kronos_result is None:
+            return StrategyDecision("no_trade", confidence, "kronos_not_ready")
+        if not getattr(self.kronos_result, "available", False):
+            return StrategyDecision("no_trade", confidence, getattr(self.kronos_result, "reason", "kronos_unavailable"))
+        kronos_direction = getattr(self.kronos_result, "direction", "no_trade")
+        kronos_confidence = float(getattr(self.kronos_result, "confidence", 0.0))
+        if kronos_direction not in {"up", "down"} or kronos_confidence < KRONOS_LEAD_MIN_CONFIDENCE:
+            return StrategyDecision("no_trade", confidence, f"kronos_lead_low_confidence;kronos_conf={kronos_confidence:.4f}")
+        if kronos_direction == "up" and edge < -KRONOS_LEAD_MAX_OPPOSITE_EDGE:
+            return StrategyDecision("no_trade", confidence, f"kronos_lead_dual_opposes_up;edge={edge:.4f}")
+        if kronos_direction == "down" and edge > KRONOS_LEAD_MAX_OPPOSITE_EDGE:
+            return StrategyDecision("no_trade", confidence, f"kronos_lead_dual_opposes_down;edge={edge:.4f}")
+        combined_confidence = min(1.0, 0.5 * confidence + 0.5 * kronos_confidence)
+        rejected = _reject_trap(features, kronos_direction, combined_confidence)
+        if rejected is not None:
+            return rejected
+        return StrategyDecision(
+            kronos_direction,
+            combined_confidence,
+            f"kronos_lead_signal;kronos_conf={kronos_confidence:.4f};edge={edge:.4f}",
+        )
+
+
 class FinStarScenarioStrategy:
     name = "finstar_scenario"
 
@@ -426,6 +487,7 @@ def default_strategies():
     return [
         BaselineDualStrategy(),
         ConservativeExtremeStrategy(),
+        AdaptiveDualStrategy(),
         ShortMomentumStrategy(),
         LongMomentumStrategy(),
         RelaxedScenarioStrategy(),
@@ -433,6 +495,7 @@ def default_strategies():
         HistoricalMatchLongStrategy(),
         HistoricalMatchShortStrategy(),
         KronosConfirmStrategy(),
+        KronosLeadStrategy(),
         FinStarScenarioStrategy(),
         HighConfidenceFilterStrategy(),
         ScenarioAwareStrategy(),
