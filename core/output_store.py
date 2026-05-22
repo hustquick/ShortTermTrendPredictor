@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from config import ALL_PREDICTIONS_CSV, OFFICIAL_SIGNALS_CSV
+from signal_funnel import record_funnel_prediction, record_funnel_validation
 from signal_quality import enrich_validation_quality
 
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
@@ -84,12 +85,14 @@ class PredictionOutputStore:
 
     def record_prediction(self, row: dict):
         self.record_all_prediction(row)
+        record_funnel_prediction(row)
         if _is_true(row.get("notify_enabled")):
             self.record_official_signal(row)
 
     def record_validation(self, row: dict):
         row = enrich_validation_quality(row)
         self.record_all_prediction(row)
+        record_funnel_validation(row)
         if _is_true(row.get("notify_enabled")):
             self.record_official_signal(row)
 
