@@ -20,6 +20,7 @@ from config import (
     STRATEGY_LEARNING_ROLLING_WINDOW,
     STRATEGY_LEARNING_STATE_FILE,
 )
+from market_regime import classify_market_regime
 from strategies.base import feature_value
 
 
@@ -59,13 +60,24 @@ def _load_validated(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _correct_metric_column(df: pd.DataFrame) -> str:
+    """Prefer tradable correctness when the validated log has it."""
+    if "tradable_correct" in df.columns:
+        return "tradable_correct"
+    if "is_tradable_correct" in df.columns:
+        return "is_tradable_correct"
+    return "correct"
+
+
 def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNING_STATE_FILE) -> dict:
     df = _load_validated(validated_csv)
     state = {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "rolling_window": STRATEGY_LEARNING_ROLLING_WINDOW,
         "min_samples": STRATEGY_LEARNING_MIN_SAMPLES,
+        "primary_metric": "tradable_correct_if_available",
         "strategy_direction": {},
+        "strategy_direction_regime": {},
         "feature_errors": {},
     }
     if df.empty:
@@ -77,33 +89,45 @@ def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNI
         _write_state(state_file, state)
         return state
 
-    df["correct_bool"] = df["correct"].map(_is_true)
+    metric_col = _correct_metric_column(df)
+    df["correct_bool"] = df[metric_col].map(_is_true)
+    if "market_regime" not in df.columns:
+        df["market_regime"] = "unknown"
+
     for (strategy, direction), group in df.groupby(["strategy", "predicted_direction"]):
-        recent = group.tail(STRATEGY_LEARNING_ROLLING_WINDOW)
-        total = int(len(recent))
-        wins = int(recent["correct_bool"].sum())
-        win_rate = float(wins / total) if total else None
-        key = f"{strategy}:{direction}"
-        if total < STRATEGY_LEARNING_MIN_SAMPLES:
-            status = "explore"
-        elif win_rate < STRATEGY_LEARNING_DISABLE_WIN_RATE:
-            status = "disabled"
-        elif win_rate >= STRATEGY_LEARNING_ENABLE_WIN_RATE:
-            status = "active"
-        else:
-            status = "probation"
-        state["strategy_direction"][key] = {
-            "strategy": strategy,
-            "direction": direction,
-            "samples": total,
-            "wins": wins,
-            "win_rate": win_rate,
-            "status": status,
-            "last_signal_time": str(recent.iloc[-1].get("signal_time", "")) if total else "",
-        }
+        _fill_state_item(state["strategy_direction"], f"{strategy}:{direction}", strategy, direction, "all", group)
+
+    for (strategy, direction, regime), group in df.groupby(["strategy", "predicted_direction", "market_regime"]):
+        key = f"{strategy}:{direction}:{regime}"
+        _fill_state_item(state["strategy_direction_regime"], key, strategy, direction, regime, group)
 
     _write_state(state_file, state)
     return state
+
+
+def _fill_state_item(bucket: dict, key: str, strategy: str, direction: str, regime: str, group: pd.DataFrame):
+    recent = group.tail(STRATEGY_LEARNING_ROLLING_WINDOW)
+    total = int(len(recent))
+    wins = int(recent["correct_bool"].sum())
+    win_rate = float(wins / total) if total else None
+    if total < STRATEGY_LEARNING_MIN_SAMPLES:
+        status = "explore"
+    elif win_rate < STRATEGY_LEARNING_DISABLE_WIN_RATE:
+        status = "disabled"
+    elif win_rate >= STRATEGY_LEARNING_ENABLE_WIN_RATE:
+        status = "active"
+    else:
+        status = "probation"
+    bucket[key] = {
+        "strategy": strategy,
+        "direction": direction,
+        "market_regime": regime,
+        "samples": total,
+        "wins": wins,
+        "win_rate": win_rate,
+        "status": status,
+        "last_signal_time": str(recent.iloc[-1].get("signal_time", "")) if total else "",
+    }
 
 
 def _write_state(path: Path, state: dict):
@@ -134,7 +158,7 @@ def _recent_error_signature_count(validated_csv: Path, strategy: str, direction:
             continue
         if row.get("predicted_direction") != direction:
             continue
-        if _is_true(row.get("correct")):
+        if _is_true(row.get("tradable_correct", row.get("is_tradable_correct", row.get("correct")))):
             continue
         if row.get("feature_signature") == signature:
             count += 1
@@ -148,10 +172,16 @@ def learning_decision(validated_csv: Path, strategy: str, direction: str, featur
         return LearningDecision(False, "no_trade", "not_directional")
 
     state = build_learning_state(validated_csv)
-    key = f"{strategy}:{direction}"
-    item = state.get("strategy_direction", {}).get(key)
+    regime = classify_market_regime(features)
+    regime_key = f"{strategy}:{direction}:{regime}"
+    fallback_key = f"{strategy}:{direction}"
+    item = state.get("strategy_direction_regime", {}).get(regime_key)
+    scope = "regime"
     if item is None:
-        return LearningDecision(False, "explore", "learning_no_samples")
+        item = state.get("strategy_direction", {}).get(fallback_key)
+        scope = "strategy_direction"
+    if item is None:
+        return LearningDecision(False, "explore", f"learning_no_samples;regime={regime}")
 
     status = item.get("status", "explore")
     samples = int(item.get("samples", 0))
@@ -160,19 +190,19 @@ def learning_decision(validated_csv: Path, strategy: str, direction: str, featur
         return LearningDecision(
             False,
             status,
-            f"learning_explore;samples={samples};win_rate={win_rate:.4f}" if win_rate is not None else f"learning_explore;samples={samples}",
+            f"learning_explore;scope={scope};regime={regime};samples={samples};win_rate={win_rate:.4f}" if win_rate is not None else f"learning_explore;scope={scope};regime={regime};samples={samples}",
         )
     if status == "disabled":
         return LearningDecision(
             False,
             status,
-            f"learning_disabled;samples={samples};win_rate={win_rate:.4f}",
+            f"learning_disabled;scope={scope};regime={regime};samples={samples};win_rate={win_rate:.4f}",
         )
     if status == "probation":
         return LearningDecision(
             False,
             status,
-            f"learning_probation_no_notify;samples={samples};win_rate={win_rate:.4f}",
+            f"learning_probation_no_notify;scope={scope};regime={regime};samples={samples};win_rate={win_rate:.4f}",
         )
 
     signature = _feature_signature(features)
@@ -181,15 +211,15 @@ def learning_decision(validated_csv: Path, strategy: str, direction: str, featur
         return LearningDecision(
             False,
             "feature_blocked",
-            f"learning_feature_blocked;signature={signature};errors={feature_errors}",
+            f"learning_feature_blocked;regime={regime};signature={signature};errors={feature_errors}",
         )
 
     if win_rate is None:
-        return LearningDecision(False, status, "learning_no_win_rate")
+        return LearningDecision(False, status, f"learning_no_win_rate;regime={regime}")
     return LearningDecision(
         status == "active",
         status,
-        f"learning_{status};samples={samples};win_rate={win_rate:.4f};signature={signature}",
+        f"learning_{status};scope={scope};regime={regime};samples={samples};win_rate={win_rate:.4f};signature={signature}",
     )
 
 
