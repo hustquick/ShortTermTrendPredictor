@@ -22,6 +22,7 @@
 - Kronos 可选确认/领先策略。
 - 每策略独立 CSV 记录。
 - 每策略独立实时图表窗口。
+- AlgoTrading 风格最小核心框架层。
 
 本 PRD 的目标是把当前系统行为和重构目标写清楚，避免后续继续叠加补丁导致职责混乱。
 
@@ -81,6 +82,37 @@ python -u main.py --mode realtime_strategies --observe-all --live-chart
 - `--no-update-cache`：只使用本地 K 线缓存，不联网补齐。
 - `--live-chart`：打开每策略独立 matplotlib 实时图表窗口。
 
+严格回测已经接入同一套 core 流程：
+
+- 使用 `FeaturePipeline` 构造特征。
+- 使用和实时相同的多策略集合生成 `final_direction`。
+- 使用和实时相同的生产质量门控与 `RiskGate` 判定正式信号。
+- 使用回测内存版 `RollingLearningGate` 按时间推进更新自学习状态。
+- 结果中 `is_valid_signal=True` 表示该行等价于实时模式的 `official_signals.csv` 正式信号。
+
+默认严格回测使用训练窗口快速历史匹配池，以避免每次模型更新都重建多桶 walk-forward 历史池造成不可接受的运行时间。需要完全样本外历史匹配池时，可显式传入：
+
+```bash
+python main.py --mode strict_backtest --walk-forward-match-pool
+```
+
+## 3.1 最小 AlgoTrading 风格架构
+
+实时策略模式按职责拆成以下核心对象：
+
+| 层 | 文件 | 职责 |
+| --- | --- | --- |
+| DataFeed | `core/data_feed.py` | 加载 BTC/USDT 1m K 线和本地缓存 |
+| FeaturePipeline | `core/feature_pipeline.py` | 把 K 线转换为模型特征 |
+| AlphaModel | `core/alpha_model.py` | 加载、重训、预测 `up/down` 概率 |
+| Strategy | `strategies/rules.py` | 将模型概率和特征转换成策略方向 |
+| RiskGate | `core/risk_gate.py` | 判断信号是否具备正式通知资格 |
+| OutputStore | `core/output_store.py` | 拆分写入所有预测和正式信号 |
+| Notifier | `core/notifier.py` | 发送企业微信预测和验证通知 |
+| Analyzer | `core/analyzer.py` | 面向正式信号统计胜率 |
+
+架构目标不是直接提高预测准确率，而是让每个环节可审计、可替换、可独立回测，避免把低置信观察样本和正式信号混在一起评估。
+
 ## 4. 核心业务规则
 
 ### 4.1 预测对象
@@ -115,6 +147,11 @@ python -u main.py --mode realtime_strategies --observe-all --live-chart
 - 强制观察预测：策略最终输出 `no_trade`，系统仍根据模型概率强制生成 `raw_direction` 记录和验证，用于积累样本与可视化，不应被当作正式信号。
 
 高置信策略胜率应优先统计正式信号。强制观察预测可用于研发和校准，但不能混入正式策略胜率。
+
+实时多策略模式的规范输出：
+
+- `data/all_predictions.csv`：记录每个策略每轮预测，无论是否低置信、是否 `no_trade`、是否通知。
+- `data/official_signals.csv`：只记录通过白名单、自学习和生产质量门槛的正式通知信号。
 
 ## 5. 数据源与缓存
 
@@ -481,8 +518,9 @@ PNG 是静态快照，不是实时窗口。
 
 额外生产质量门槛：
 
-- `adaptive_dual`：`confidence >= 0.80`、`abs(direction_edge) >= 0.50`，且同方向必须有历史匹配策略或高置信 Kronos 策略二次确认。
-- `kronos_confirm` / `kronos_lead`：`kronos_conf >= 0.12`。
+- `adaptive_dual`：`confidence >= 0.75`、`abs(direction_edge) >= 0.50`，且同方向必须有历史匹配策略或高置信 Kronos 策略二次确认。
+- `kronos_confirm` / `kronos_lead`：只允许做多正式通知，且 `kronos_conf >= 0.10`。
+- `kronos_lead`：允许领先，但不能逆着明显双子模型方向；当前反向 edge 容忍度为 `0.05`。
 - Kronos 做空通知当前禁用；做空结果继续记录和验证。
 
 未通过额外门槛的策略方向只记录和验证，不推送企业微信。

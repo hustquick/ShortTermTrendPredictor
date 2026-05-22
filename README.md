@@ -11,6 +11,15 @@ BTC/USDT 1 分钟 K 线未来 10 分钟涨跌二分类预测项目。
 
 ```text
 ShortTermTrendPredictor/
+├── core/
+│   ├── data_feed.py
+│   ├── feature_pipeline.py
+│   ├── alpha_model.py
+│   ├── output_store.py
+│   ├── risk_gate.py
+│   ├── notifier.py
+│   └── analyzer.py
+├── strategies/
 ├── config.py
 ├── data_download.py
 ├── features.py
@@ -38,17 +47,41 @@ ShortTermTrendPredictor/
 - API Key：从 `BINANCE_API_KEY` 环境变量读取，不硬编码。
 - Mac SSL：请求使用 `verify=False` 并关闭相关 warning。
 
+## 最小 AlgoTrading 风格框架
+
+实时多策略模式已经拆成最小量化框架层：
+
+- `core.data_feed.RealtimeDataFeed`：只负责 BTC/USDT 1m K 线加载和本地缓存。
+- `core.feature_pipeline.FeaturePipeline`：只负责从 K 线构造模型特征。
+- `core.alpha_model.AlphaModelManager`：只负责加载、重训和输出模型概率。
+- `strategies/*`：只负责把概率和特征转成策略方向。
+- `core.risk_gate.RiskGate`：只决定策略信号是否具备正式通知资格。
+- `core.output_store.PredictionOutputStore`：只负责拆分记录所有预测和正式信号。
+- `core.notifier.EnterpriseWechatNotifier`：只负责正式信号和验证通知。
+- `core.analyzer.SignalAnalyzer`：只面向正式信号统计胜率。
+
+这个拆分的目标是让“模型预测差、策略过滤差、自学习门控挡住、还是通知失败”可以分别定位。
+
 ## 输出文件
 
-实时预测只写入 `data/predictions.csv`，不会写入历史回测结果或批量回填数据。
+实时多策略模式把输出拆成两类：
 
-字段顺序固定：
+- `data/all_predictions.csv`：每个启用策略每轮都会记录 1 条强制方向预测，低置信和 `no_trade` 也记录，用于学习、图表和诊断。
+- `data/official_signals.csv`：只记录通过白名单、自学习、生产质量门槛并会触发企业微信通知的正式信号。
+
+旧文件仍保留兼容：
+
+- `data/strategy_predictions.csv`：历史聚合策略预测记录。
+- `data/strategy_predictions/{strategy}.csv`：每策略独立观察记录。
+- `data/predictions.csv`：传统单策略实时预测兼容文件。
+
+传统 `data/predictions.csv` 字段顺序固定：
 
 ```csv
 timestamp,current_price,future_price,predicted_direction,actual_direction,up_probability,confidence,is_valid_signal,is_correct
 ```
 
-实时预测会先追加一条当前预测记录；到达未来 10 分钟后，再通过精确毫秒时间戳匹配真实 future price 并回填验证字段。
+实时预测会先追加当前预测记录；到达未来 10 分钟后，再通过精确毫秒时间戳匹配真实 future price 并回填验证字段。
 
 ## 安装
 
@@ -85,6 +118,14 @@ python3 main.py --mode training_backtest
 
 ```bash
 python3 main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --model-update-minutes 30
+```
+
+严格回测已经接入 `core` 流程，和实时多策略模式共用策略集合、生产质量门控、自学习滚动门控和正式信号判定逻辑。回测结果中的 `is_valid_signal=True` 等价于实时模式会写入 `data/official_signals.csv` 的正式信号；低置信或 `no_trade` 预测仍会作为观察样本保留。
+
+默认严格回测使用训练窗口快速历史匹配池，保证预测点不使用未来数据；如果需要历史匹配池本身也完全 walk-forward 样本外，可启用更慢的模式：
+
+```bash
+python3 main.py --mode strict_backtest --backtest-days 10 --walk-forward-match-pool
 ```
 
 如果只想快速抽样，可以限制最大预测点数：
@@ -130,7 +171,7 @@ python3 main.py --mode realtime_strategies --observe-all --live-chart
 - short 拒绝反弹陷阱：`ret_10 > 0 且 macd_hist > 0`、`ret_30 > 0 且 macd_hist > 0`、`close_position < 0.02`、`close_position > 0.98 且 ret_10 > 0`、或 `rsi_14 < 45 且 boll_position <= 0.15`。
 - long 拒绝追高陷阱：`rsi_14 > 80`、`boll_position > 0.84`、或 `close_position > 0.98`。
 
-实时策略包含自学习门控：系统会按 `strategy + direction` 统计最近验证结果，生成 `data/strategy_learning_state.json`。当前正式通知必须同时满足生产白名单、滚动样本不少于 10 条、胜率达到 70% 且状态为 active；`explore`、`probation`、`disabled` 方向都会继续记录和验证，但不再推送企业微信。Kronos 正式通知还要求 `kronos_conf >= 0.12`，且当前禁用 Kronos 做空通知；adaptive 正式通知要求 `confidence >= 0.80`、`abs(edge) >= 0.50`，并且同方向必须有历史匹配或高置信 Kronos 二次确认。
+实时策略包含自学习门控：系统会按 `strategy + direction` 统计最近验证结果，生成 `data/strategy_learning_state.json`。当前正式通知必须同时满足生产白名单、滚动样本不少于 10 条、胜率达到 70% 且状态为 active；`explore`、`probation`、`disabled` 方向都会继续记录和验证，但不再推送企业微信。Kronos 正式通知只允许做多，要求 `kronos_conf >= 0.10`；`kronos_lead` 还要求不能逆着明显双子模型方向，当前反向 edge 容忍度为 `0.05`。adaptive 正式通知要求 `confidence >= 0.75`、`abs(edge) >= 0.50`，并且同方向必须有历史匹配或高置信 Kronos 二次确认。
 
 启动性能优化：
 

@@ -10,15 +10,39 @@ from config import (
     CSV_COLUMNS,
     LABEL_NEUTRAL_THRESHOLD,
     LONG_SIGNAL_THRESHOLD,
+    OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST,
     MIN_SIGNALS_FOR_THRESHOLD_SEARCH,
     PREDICT_HORIZON_MINUTES,
     PROB_BIN_WIDTH,
     SHORT_SIGNAL_THRESHOLD,
     USE_LABEL_NEUTRAL_ZONE,
 )
+from core.feature_pipeline import FeaturePipeline
+from core.learning_gate import RollingLearningGate
+from core.risk_gate import RiskGate
 from data_download import ms_to_beijing_time
 from features import build_features
+from historical_match_filter import build_historical_match_rows, build_walk_forward_historical_match_rows
+from realtime_strategy_runner import (
+    STRATEGY_MAP,
+    _build_quality_context,
+    _skipped_kronos_result,
+    passes_production_quality_gate,
+)
 from trainer import ProbabilityStabilityFilter, train_overfit_model, train_validation_model
+
+
+BACKTEST_STRATEGIES = (
+    "short_momentum",
+    "adaptive_dual",
+    "relaxed_scenario",
+    "historical_match",
+    "historical_match_long",
+    "historical_match_short",
+    "kronos_confirm",
+    "kronos_lead",
+    "finstar_scenario",
+)
 
 
 def actual_direction(current_price: float, future_price: float) -> str:
@@ -252,6 +276,7 @@ def strict_walk_forward_backtest(
     min_train_samples: int,
     max_steps: int,
     progress_every: int = BACKTEST_PROGRESS_EVERY,
+    use_walk_forward_match_pool: bool = False,
 ) -> pd.DataFrame:
     """
     严格时序滚动验证回测。
@@ -261,12 +286,14 @@ def strict_walk_forward_backtest(
     - 更新间隔内的预测使用最近一次训练好的模型；
     - 当前点之后的数据只用于事后验证；
     - 固定目标：future_close[t+10] > current_close[t]；
-    - no_trade 不参与胜率统计。
+    - no_trade 不参与胜率统计；
+    - 策略、生产质量门控、风险门控与 realtime_strategies 共用同一套逻辑。
     """
     df = df.copy()
     df = df.sort_values("timestamp").reset_index(drop=True)
     close_by_timestamp = df.set_index("timestamp")["close"]
-    feature_df = build_features(df)
+    feature_pipeline = FeaturePipeline()
+    feature_df = feature_pipeline.build(df)
 
     n = len(df)
     horizon = PREDICT_HORIZON_MINUTES
@@ -308,6 +335,7 @@ def strict_walk_forward_backtest(
     if USE_LABEL_NEUTRAL_ZONE:
         print(f"  标签灰区阈值: ±{LABEL_NEUTRAL_THRESHOLD}")
     print("  说明: 预测按步长推进，模型只在更新间隔到达时用最近历史重新训练。")
+    print(f"  历史匹配池模式: {'walk-forward 样本外' if use_walk_forward_match_pool else '训练窗口快速池'}")
 
     results = []
     started = time.time()
@@ -316,6 +344,11 @@ def strict_walk_forward_backtest(
     next_model_update_idx = None
     train_count = 0
     signal_filter = ProbabilityStabilityFilter()
+    risk_gate = RiskGate()
+    learning_gate = RollingLearningGate()
+    official_strategies = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
+    strategies = [STRATEGY_MAP[name]() for name in BACKTEST_STRATEGIES]
+    historical_rows = None
 
     for step_no, i in enumerate(candidate_indices, start=1):
         point_time = ms_to_beijing_time(int(df.iloc[i]["timestamp"]))
@@ -349,6 +382,18 @@ def strict_walk_forward_backtest(
                     f"trained_at={model_trained_at_time}, "
                     f"next_update_index>={next_model_update_idx}"
                 )
+                train_features = feature_pipeline.build(train_df).dropna(subset=model.feature_cols).copy()
+                if use_walk_forward_match_pool:
+                    historical_rows = build_walk_forward_historical_match_rows(train_features, train_df)
+                else:
+                    historical_rows = build_historical_match_rows(train_features, model, train_df)
+                for strategy in strategies:
+                    if hasattr(strategy, "update_history"):
+                        strategy.update_history(historical_rows)
+                    if hasattr(strategy, "update_kronos_result"):
+                        strategy.update_kronos_result(_skipped_kronos_result("kronos_not_used_in_strict_backtest"))
+                pool_name = "walk-forward 样本外历史匹配池" if use_walk_forward_match_pool else "训练窗口快速历史匹配池"
+                print(f"[严格回测] {pool_name}: {len(historical_rows)} 条")
             except Exception as exc:
                 print(f"[严格回测] 训练失败 step={step_no}, index={i}: {exc}")
                 continue
@@ -377,43 +422,89 @@ def strict_walk_forward_backtest(
             future_price = float(close_by_timestamp.loc[future_ms])
             future_return = future_price / current_price - 1
 
-            pred_dir = pred["predicted_direction"]
             act_dir = actual_direction(current_price, future_price)
-            raw_pred_dir = raw_probability_direction(float(pred["up_probability"]))
+            timestamp_text = ms_to_beijing_time(int(current_row["timestamp"]))
+            strategy_decisions = []
+            feature_row = latest.iloc[0]
 
-            filtered_correct = None if pred_dir == "no_trade" else pred_dir == act_dir
-            raw_correct = None if raw_pred_dir == "no_trade" else raw_pred_dir == act_dir
+            for strategy in strategies:
+                decision = strategy.decide(feature_row, pred)
+                strategy_decisions.append((strategy.name, decision))
 
-            row = {
-                "timestamp": ms_to_beijing_time(int(current_row["timestamp"])),
-                "current_price": current_price,
-                "future_price": future_price,
-                "future_return": future_return,
-                "predicted_direction": pred_dir,
-                "actual_direction": act_dir,
-                "raw_predicted_direction": raw_pred_dir,
-                "up_probability": pred["up_probability"],
-                "confidence": pred["confidence"],
-                "is_valid_signal": pred["is_valid_signal"],
-                "is_correct": bool(filtered_correct) if filtered_correct is not None else False,
-                "filtered_is_correct": filtered_correct,
-                "raw_is_correct": raw_correct,
-                "model_trained_at": model_trained_at_time,
-            }
+            quality_context = _build_quality_context(strategy_decisions)
+            official_count = 0
+            final_count = 0
 
-            results.append(row)
+            for strategy_name, decision in strategy_decisions:
+                p_up = float(pred.get("up_signal_probability", 0.0))
+                p_down = float(pred.get("down_signal_probability", 0.0))
+                raw_pred_dir = (
+                    decision.direction
+                    if decision.direction in {"up", "down"}
+                    else ("up" if p_up >= p_down else "down")
+                )
+                final_direction = decision.direction
+                learning = learning_gate.decide(strategy_name, raw_pred_dir)
+                reason = f"{decision.reason};{learning.reason}"
+                quality_ok, quality_reason = passes_production_quality_gate(
+                    strategy_name=strategy_name,
+                    raw_direction=raw_pred_dir,
+                    confidence=float(decision.confidence),
+                    prediction=pred,
+                    reason=reason,
+                    quality_context=quality_context,
+                )
+                reason = f"{reason};{quality_reason}"
+                notify_enabled = risk_gate.is_official(
+                    final_direction=final_direction,
+                    strategy_is_allowed=strategy_name in official_strategies,
+                    learning_notify=learning.notify,
+                    quality_ok=quality_ok,
+                )
+                is_correct = raw_pred_dir == act_dir
+                predicted_direction = raw_pred_dir if notify_enabled else "no_trade"
+
+                if final_direction in {"up", "down"}:
+                    final_count += 1
+                    learning_gate.observe(strategy_name, raw_pred_dir, is_correct)
+                if notify_enabled:
+                    official_count += 1
+
+                row = {
+                    "timestamp": timestamp_text,
+                    "strategy": strategy_name,
+                    "current_price": current_price,
+                    "future_price": future_price,
+                    "future_return": future_return,
+                    "predicted_direction": predicted_direction,
+                    "actual_direction": act_dir,
+                    "raw_predicted_direction": raw_pred_dir,
+                    "final_direction": final_direction,
+                    "notify_enabled": notify_enabled,
+                    "up_probability": pred["up_probability"],
+                    "up_signal_probability": pred.get("up_signal_probability"),
+                    "down_signal_probability": pred.get("down_signal_probability"),
+                    "direction_edge": pred.get("direction_edge"),
+                    "confidence": float(decision.confidence),
+                    "reason": reason,
+                    "is_valid_signal": notify_enabled,
+                    "is_correct": bool(is_correct) if notify_enabled else False,
+                    "filtered_is_correct": is_correct if notify_enabled else None,
+                    "raw_is_correct": is_correct,
+                    "model_trained_at": model_trained_at_time,
+                }
+                results.append(row)
 
             print(
                 f"[严格回测] 完成："
                 f"p_up={pred['up_probability']:.4f}, "
-                f"raw_signal={raw_pred_dir}, "
-                f"filtered_signal={pred_dir}, "
+                f"up_signal={pred.get('up_signal_probability'):.4f}, "
+                f"down_signal={pred.get('down_signal_probability'):.4f}, "
+                f"final_strategy_signals={final_count}, "
+                f"official_signals={official_count}, "
                 f"actual={act_dir}, "
                 f"future_return={future_return:.6f}, "
-                f"model_at={model_trained_at_time}, "
-                f"filtered_valid={pred['is_valid_signal']}, "
-                f"filtered_correct={filtered_correct}, "
-                f"raw_correct={raw_correct}"
+                f"model_at={model_trained_at_time}"
             )
 
         except Exception as exc:

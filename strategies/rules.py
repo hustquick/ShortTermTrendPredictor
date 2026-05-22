@@ -5,6 +5,12 @@ import pandas as pd
 from config import (
     ADAPTIVE_DUAL_MIN_CONFIDENCE,
     ADAPTIVE_DUAL_MIN_EDGE,
+    ADAPTIVE_STRICT_ALLOW_DOWN,
+    ADAPTIVE_STRICT_FILTER_ENABLED,
+    ADAPTIVE_STRICT_LONG_MAX_BOLL_POSITION,
+    ADAPTIVE_STRICT_LONG_MAX_CLOSE_POSITION,
+    ADAPTIVE_STRICT_LONG_MAX_RSI_14,
+    ADAPTIVE_STRICT_LONG_MIN_RET_30,
     KRONOS_LEAD_MAX_OPPOSITE_EDGE,
     KRONOS_LEAD_MIN_CONFIDENCE,
     LONG_SIGNAL_THRESHOLD,
@@ -185,10 +191,27 @@ class AdaptiveDualStrategy:
         if confidence < ADAPTIVE_DUAL_MIN_CONFIDENCE or abs(edge) < ADAPTIVE_DUAL_MIN_EDGE:
             return StrategyDecision("no_trade", confidence, "adaptive_dual_low_confidence_or_edge")
         direction = "up" if edge > 0 else "down"
+        if ADAPTIVE_STRICT_FILTER_ENABLED:
+            if direction == "down" and not ADAPTIVE_STRICT_ALLOW_DOWN:
+                return StrategyDecision("no_trade", confidence, "adaptive_strict_down_disabled_no_robust_filter")
+            if direction == "up":
+                ret_30 = feature_value(features, "ret_30")
+                boll_position = feature_value(features, "boll_position", 0.5)
+                rsi_14 = feature_value(features, "rsi_14", 50.0)
+                close_position = feature_value(features, "close_position", 0.5)
+                if ret_30 < ADAPTIVE_STRICT_LONG_MIN_RET_30:
+                    return StrategyDecision("no_trade", confidence, "adaptive_strict_long_ret30_rejected")
+                if boll_position >= ADAPTIVE_STRICT_LONG_MAX_BOLL_POSITION:
+                    return StrategyDecision("no_trade", confidence, "adaptive_strict_long_boll_rejected")
+                if rsi_14 >= ADAPTIVE_STRICT_LONG_MAX_RSI_14:
+                    return StrategyDecision("no_trade", confidence, "adaptive_strict_long_rsi_rejected")
+                if close_position >= ADAPTIVE_STRICT_LONG_MAX_CLOSE_POSITION:
+                    return StrategyDecision("no_trade", confidence, "adaptive_strict_long_close_position_rejected")
         rejected = _reject_trap(features, direction, confidence)
         if rejected is not None:
             return rejected
-        return StrategyDecision(direction, confidence, "adaptive_dual_edge_signal")
+        reason = "adaptive_dual_strict_long_pullback_signal" if ADAPTIVE_STRICT_FILTER_ENABLED else "adaptive_dual_edge_signal"
+        return StrategyDecision(direction, confidence, reason)
 
 
 class RelaxedScenarioStrategy:

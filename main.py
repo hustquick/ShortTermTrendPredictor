@@ -146,6 +146,7 @@ def run_strict_backtest(
     model_update_minutes: int | None = None,
     max_steps: int | None = None,
     no_update_cache: bool = False,
+    walk_forward_match_pool: bool = False,
 ):
     """
     严格时序回测。
@@ -179,6 +180,7 @@ def run_strict_backtest(
     print(f"[严格回测] 模型更新间隔：{model_update_minutes} 分钟")
     print(f"[严格回测] 最大回测点数：{max_steps}")
     print(f"[严格回测] 是否禁止更新缓存：{no_update_cache}")
+    print(f"[严格回测] 是否使用 walk-forward 历史匹配池：{walk_forward_match_pool}")
 
     try:
         df = get_recent_klines_with_cache(
@@ -203,6 +205,7 @@ def run_strict_backtest(
         min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
         max_steps=max_steps,
         progress_every=BACKTEST_PROGRESS_EVERY,
+        use_walk_forward_match_pool=walk_forward_match_pool,
     )
 
     report = high_confidence_report(result)
@@ -352,6 +355,12 @@ def main():
     )
 
     parser.add_argument(
+        "--walk-forward-match-pool",
+        action="store_true",
+        help="严格回测使用完全样本外历史匹配池；更接近 realtime 但会显著变慢。",
+    )
+
+    parser.add_argument(
         "--strategies",
         type=str,
         default=None,
@@ -411,6 +420,7 @@ def main():
             model_update_minutes=args.model_update_minutes,
             max_steps=args.max_steps,
             no_update_cache=args.no_update_cache,
+            walk_forward_match_pool=args.walk_forward_match_pool,
         )
 
     elif args.mode == "tune_dual_model":

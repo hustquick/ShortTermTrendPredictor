@@ -16,6 +16,9 @@ from config import (
     ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
     ADAPTIVE_NOTIFY_MIN_EDGE,
     DATA_DIR,
+    ALL_PREDICTIONS_CSV,
+    HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
+    HISTORICAL_MATCH_NOTIFY_MIN_SUCCESS_RATE,
     HISTORICAL_MATCH_CACHE_FILE,
     HISTORICAL_MATCH_CACHE_MAX_AGE_MINUTES,
     HISTORICAL_MATCH_CACHE_STALE_MAX_HOURS,
@@ -25,16 +28,21 @@ from config import (
     KRONOS_RUN_MIN_CONFIDENCE,
     KRONOS_RUN_MIN_EDGE,
     OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST,
+    OFFICIAL_SIGNALS_CSV,
     PREDICT_HORIZON_MINUTES,
     PREDICTIONS_CSV,
     REALTIME_INTERVAL_SECONDS,
 )
-from data_download import get_recent_klines_with_cache, ms_to_beijing_time
-from features import build_features
+from core.alpha_model import AlphaModelManager
+from core.data_feed import RealtimeDataFeed
+from core.feature_pipeline import FeaturePipeline
+from core.notifier import EnterpriseWechatNotifier
+from core.output_store import PredictionOutputStore
+from core.risk_gate import RiskGate
+from data_download import ms_to_beijing_time
 from historical_match_filter import build_walk_forward_historical_match_rows
 from kronos_adapter import KronosAdapter, KronosForecastResult
 from strategy_learning import build_learning_state, feature_signature, learning_decision
-from strategy_notifier import send_prediction_signal, send_validation_signal
 from strategies.rules import (
     AdaptiveDualStrategy,
     FinStarScenarioStrategy,
@@ -46,7 +54,6 @@ from strategies.rules import (
     RelaxedScenarioStrategy,
     ShortMomentumStrategy,
 )
-from trainer import load_model, save_model, train_validation_model
 
 
 STRATEGY_MAP = {
@@ -107,6 +114,9 @@ PER_STRATEGY_PREDICTION_COLUMNS = [
 ]
 
 OFFICIAL_SIGNAL_STRATEGIES = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
+OUTPUT_STORE = PredictionOutputStore()
+RISK_GATE = RiskGate()
+NOTIFIER = EnterpriseWechatNotifier()
 
 
 def parse_strategy_names(strategy_names: str):
@@ -356,6 +366,18 @@ def passes_production_quality_gate(
         kronos_confidence = _extract_reason_float(reason, "kronos_conf") or 0.0
         if kronos_confidence < KRONOS_NOTIFY_MIN_CONFIDENCE:
             return False, f"production_blocked;kronos_conf_below_{KRONOS_NOTIFY_MIN_CONFIDENCE:.2f}"
+        return True, "production_quality_passed"
+
+    if strategy_name in {"historical_match", "historical_match_long", "historical_match_short"}:
+        matched = _extract_reason_float(reason, "matched") or 0.0
+        success_rate = _extract_reason_float(reason, "success_rate")
+        if matched < HISTORICAL_MATCH_NOTIFY_MIN_MATCHED:
+            return False, f"production_blocked;historical_match_matched_below_{HISTORICAL_MATCH_NOTIFY_MIN_MATCHED}"
+        if success_rate is None or success_rate < HISTORICAL_MATCH_NOTIFY_MIN_SUCCESS_RATE:
+            return False, (
+                "production_blocked;"
+                f"historical_match_success_below_{HISTORICAL_MATCH_NOTIFY_MIN_SUCCESS_RATE:.2f}"
+            )
         return True, "production_quality_passed"
 
     return True, "production_quality_passed"
@@ -794,11 +816,32 @@ def validate_due_signals(df, now_ms: int):
                 "notify_enabled": row.get("notify_enabled"),
             },
         )
+        OUTPUT_STORE.record_validation(
+            {
+                "prediction_id": row["prediction_id"],
+                "timestamp": row["signal_time"],
+                "strategy": row["strategy"],
+                "current_price": signal_price,
+                "raw_direction": predicted_direction,
+                "final_direction": final_direction,
+                "confidence": row["confidence"],
+                "reason": row.get("reason"),
+                "up_signal_probability": row.get("up_signal_probability"),
+                "down_signal_probability": row.get("down_signal_probability"),
+                "direction_edge": row.get("direction_edge"),
+                "validation_timestamp": validation_time,
+                "validation_status": "validated",
+                "actual_direction": actual_direction,
+                "future_price": validation_price,
+                "is_correct": is_correct,
+                "notify_enabled": row.get("notify_enabled"),
+            }
+        )
         validated_strategy_names.add(row["strategy"])
 
         notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
         if notify_enabled:
-            send_validation_signal(
+            NOTIFIER.send_validation(
                 strategy_name=row["strategy"],
                 prediction_id=row["prediction_id"],
                 predicted_direction=predicted_direction,
@@ -864,11 +907,11 @@ def register_prediction_signal(
         reason=reason,
         quality_context=quality_context,
     )
-    notify_enabled = (
-        final_direction in {"up", "down"}
-        and is_official_signal_strategy(strategy_name)
-        and learning.notify
-        and quality_ok
+    notify_enabled = RISK_GATE.is_official(
+        final_direction=final_direction,
+        strategy_is_allowed=is_official_signal_strategy(strategy_name),
+        learning_notify=learning.notify,
+        quality_ok=quality_ok,
     )
     reason = f"{reason};{quality_reason}"
     skip_reasons = []
@@ -924,6 +967,27 @@ def register_prediction_signal(
             "notify_enabled": notify_enabled,
         },
     )
+    OUTPUT_STORE.record_prediction(
+        {
+            "prediction_id": prediction_id,
+            "timestamp": signal_time,
+            "strategy": strategy_name,
+            "current_price": float(current_price),
+            "raw_direction": raw_direction,
+            "final_direction": final_direction,
+            "confidence": float(decision.confidence),
+            "reason": reason,
+            "up_signal_probability": prediction.get("up_signal_probability"),
+            "down_signal_probability": prediction.get("down_signal_probability"),
+            "direction_edge": prediction.get("direction_edge"),
+            "validation_timestamp": validation_time,
+            "validation_status": "pending",
+            "actual_direction": "",
+            "future_price": "",
+            "is_correct": "",
+            "notify_enabled": notify_enabled,
+        }
+    )
 
     pending = load_pending_signals()
     already_pending = False
@@ -963,7 +1027,7 @@ def register_prediction_signal(
     )
 
     if notify_enabled:
-        send_prediction_signal(
+        NOTIFIER.send_prediction(
             strategy_name=strategy_name,
             direction=raw_direction,
             confidence=float(decision.confidence),
@@ -1106,21 +1170,24 @@ def run_realtime_strategies(
     strategies = [STRATEGY_MAP[name]() for name in names]
     use_kronos = any(name in {"kronos_confirm", "kronos_lead"} for name in names)
     kronos_adapter = KronosAdapter() if use_kronos else None
+    data_feed = RealtimeDataFeed(minutes=train_minutes, update_cache=update_cache)
+    feature_pipeline = FeaturePipeline()
+    alpha_model = AlphaModelManager(retrain_interval_seconds=30 * 60)
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
     print(f"[realtime_strategy] official_notification_allowlist={','.join(sorted(OFFICIAL_SIGNAL_STRATEGIES))}")
     print(f"[realtime_strategy] supported strategies: {','.join(STRATEGY_MAP.keys())}")
     print("[realtime_strategy] objective=high-confidence directional accuracy only")
-    print(f"[realtime_strategy] predictions_csv={PREDICTIONS_CSV}")
+    print(f"[realtime_strategy] all_predictions_csv={ALL_PREDICTIONS_CSV}")
+    print(f"[realtime_strategy] official_signals_csv={OFFICIAL_SIGNALS_CSV}")
+    print(f"[realtime_strategy] legacy_predictions_csv={PREDICTIONS_CSV}")
     print(f"[realtime_strategy] strategy_predictions_csv={STRATEGY_PREDICTIONS_CSV}")
     print(f"[realtime_strategy] strategy_predictions_latest_csv={STRATEGY_PREDICTIONS_LATEST_CSV}")
     rebuild_latest_predictions_from_log()
 
-    model = load_model()
-    if model is not None:
+    if alpha_model.load():
         print("[realtime_strategy] loaded saved model; startup retrain deferred until next interval")
-    last_train_time = datetime.now() if model is not None else None
     historical_rows = None
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
     if live_chart_window is not None:
@@ -1128,7 +1195,7 @@ def run_realtime_strategies(
 
     while True:
         try:
-            df = get_recent_klines_with_cache(minutes=train_minutes, update_if_needed=update_cache)
+            df = data_feed.load()
             if df.empty:
                 print("[realtime_strategy] empty data")
                 if once:
@@ -1141,21 +1208,18 @@ def run_realtime_strategies(
             if live_chart_window is not None:
                 live_chart_window.update()
 
-            need_train = model is None
-            if last_train_time is None:
-                need_train = True
-            elif (datetime.now() - last_train_time).total_seconds() >= 30 * 60:
-                need_train = True
-
-            if need_train:
+            if alpha_model.model is None or alpha_model.last_train_time is None:
                 print("[realtime_strategy] training model")
-                model = train_validation_model(df)
-                save_model(model)
-                last_train_time = datetime.now()
+                alpha_model.ensure_trained(df)
+                print("[realtime_strategy] model updated")
+                historical_rows = None
+            elif (datetime.now() - alpha_model.last_train_time).total_seconds() >= 30 * 60:
+                print("[realtime_strategy] training model")
+                alpha_model.ensure_trained(df)
                 print("[realtime_strategy] model updated")
                 historical_rows = None
 
-            feature_df = build_features(df).dropna(subset=model.feature_cols).copy()
+            feature_df = feature_pipeline.build(df, alpha_model.feature_cols)
             if feature_df.empty:
                 print("[realtime_strategy] empty features")
                 if once:
@@ -1164,13 +1228,13 @@ def run_realtime_strategies(
                 continue
 
             if historical_rows is None and any(hasattr(s, "update_history") for s in strategies):
-                historical_rows = _refresh_historical_match_rows(df, feature_df, model)
+                historical_rows = _refresh_historical_match_rows(df, feature_df, alpha_model.model)
                 _update_historical_strategy_context(strategies, historical_rows)
 
             latest = feature_df.iloc[[-1]].copy()
-            latest_features = latest[model.feature_cols]
+            latest_features = latest[alpha_model.feature_cols]
             feature_row = latest.iloc[0]
-            prediction = model.predict_one(latest_features, signal_filter=None)
+            prediction = alpha_model.predict_one(latest_features)
 
             current_price = float(df.iloc[-1]["close"])
             signal_timestamp = int(df.iloc[-1]["timestamp"])
