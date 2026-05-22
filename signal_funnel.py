@@ -7,13 +7,14 @@ import os
 import sys
 from pathlib import Path
 
-from config import DATA_DIR
+from config import DATA_DIR, OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST
 from signal_quality import enrich_validation_quality
 
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
 SIGNAL_FUNNEL_CSV = DATA_DIR / "signal_funnel.csv"
 STRATEGY_REGIME_REPORT_CSV = DATA_DIR / "strategy_regime_report.csv"
+OFFICIAL_STRATEGIES = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
 
 SIGNAL_FUNNEL_COLUMNS = [
     "prediction_id",
@@ -130,12 +131,13 @@ def _normalize_funnel_row(row: dict) -> dict:
     reason = str(out.get("reason", ""))
     raw_direction = out.get("raw_direction") or out.get("predicted_direction") or out.get("direction")
     final_direction = out.get("final_direction") or raw_direction
+    strategy = out.get("strategy", "")
     out["raw_direction"] = raw_direction
     out["final_direction"] = final_direction
     out["market_regime"] = _infer_market_regime(out)
     out.setdefault("candidate_passed", raw_direction in {"up", "down"})
     out.setdefault("trap_passed", not reason.startswith(("long_chase_trap", "short_rebound_trap")))
-    out.setdefault("allowlist_passed", "not_official_strategy" not in reason)
+    out.setdefault("allowlist_passed", strategy in OFFICIAL_STRATEGIES)
     out.setdefault("learning_passed", "learning_explore" not in reason and "learning_disabled" not in reason and "learning_probation" not in reason and "learning_feature_blocked" not in reason)
     out.setdefault("quality_passed", "production_blocked" not in reason)
     out["blocked_stage"] = out.get("blocked_stage") or infer_blocked_stage(out)
