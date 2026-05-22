@@ -130,6 +130,9 @@ def send_validation_signal(
     strategy_accuracy: float | None = None,
     strategy_correct_count: int | None = None,
     strategy_total_count: int | None = None,
+    official_accuracy: float | None = None,
+    official_correct_count: int | None = None,
+    official_total_count: int | None = None,
 ) -> bool:
     display_name = strategy_display_name(strategy_name)
     result_emoji = "✅" if is_correct else "❌"
@@ -145,8 +148,10 @@ def send_validation_signal(
         f"⏰ 信号时间：{signal_time}",
         f"🕒 验证时间：{validation_time}",
         f"🔥 原始策略置信度：{confidence:.4f}",
-        f"📊 该策略高置信统计准确率：{_fmt_rate(strategy_accuracy)}",
-        f"🧮 该策略已验证高置信样本：{_fmt_int(strategy_correct_count)}/{_fmt_int(strategy_total_count)}",
+        f"📊 正式通知总准确率：{_fmt_rate(official_accuracy)}",
+        f"🧮 已验证正式通知样本：{_fmt_int(official_correct_count)}/{_fmt_int(official_total_count)}",
+        f"📌 该策略正式通知准确率：{_fmt_rate(strategy_accuracy)}",
+        f"🧾 该策略正式通知样本：{_fmt_int(strategy_correct_count)}/{_fmt_int(strategy_total_count)}",
     ]
 
     lines.append("")

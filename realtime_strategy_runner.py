@@ -303,26 +303,28 @@ def append_validated_signal(row: dict):
     _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
 
-def _load_strategy_accuracy_before(strategy_name: str) -> tuple[float | None, int, int]:
-    if not VALIDATED_STRATEGY_SIGNALS.exists():
+def _load_official_accuracy_before(strategy_name: str | None = None) -> tuple[float | None, int, int]:
+    if not OFFICIAL_SIGNALS_CSV.exists():
         return None, 0, 0
     total = 0
     correct = 0
-    with open(VALIDATED_STRATEGY_SIGNALS, "r", encoding="utf-8", newline="") as f:
+    with open(OFFICIAL_SIGNALS_CSV, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row.get("strategy") != strategy_name:
+            if row.get("validation_status") != "validated":
+                continue
+            if strategy_name is not None and row.get("strategy") != strategy_name:
                 continue
             total += 1
-            if str(row.get("correct", "")).lower() == "true":
+            if str(row.get("is_correct", "")).lower() == "true":
                 correct += 1
     if total == 0:
         return None, correct, total
     return correct / total, correct, total
 
 
-def _strategy_accuracy_after_current(strategy_name: str, current_correct: bool) -> tuple[float, int, int]:
-    previous_accuracy, previous_correct, previous_total = _load_strategy_accuracy_before(strategy_name)
+def _official_accuracy_after_current(strategy_name: str | None, current_correct: bool) -> tuple[float, int, int]:
+    previous_accuracy, previous_correct, previous_total = _load_official_accuracy_before(strategy_name)
     correct = previous_correct + (1 if current_correct else 0)
     total = previous_total + 1
     return correct / total, correct, total
@@ -774,10 +776,18 @@ def validate_due_signals(df, now_ms: int):
         final_direction = row.get("final_direction") or row.get("direction")
         is_correct = predicted_direction == actual_direction
         validation_time = ms_to_beijing_time(validation_timestamp)
-        strategy_accuracy, strategy_correct_count, strategy_total_count = _strategy_accuracy_after_current(
-            row["strategy"],
-            is_correct,
-        )
+        notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
+        strategy_accuracy = strategy_correct_count = strategy_total_count = None
+        official_accuracy = official_correct_count = official_total_count = None
+        if notify_enabled:
+            strategy_accuracy, strategy_correct_count, strategy_total_count = _official_accuracy_after_current(
+                row["strategy"],
+                is_correct,
+            )
+            official_accuracy, official_correct_count, official_total_count = _official_accuracy_after_current(
+                None,
+                is_correct,
+            )
 
         if final_direction in {"up", "down"}:
             validation_row = {
@@ -867,7 +877,6 @@ def validate_due_signals(df, now_ms: int):
         )
         validated_strategy_names.add(row["strategy"])
 
-        notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
         if notify_enabled:
             NOTIFIER.send_validation(
                 strategy_name=row["strategy"],
@@ -886,6 +895,9 @@ def validate_due_signals(df, now_ms: int):
                 strategy_accuracy=strategy_accuracy,
                 strategy_correct_count=strategy_correct_count,
                 strategy_total_count=strategy_total_count,
+                official_accuracy=official_accuracy,
+                official_correct_count=official_correct_count,
+                official_total_count=official_total_count,
             )
         else:
             print(f"[realtime_strategy] validation notification skipped for observation strategy={row['strategy']}")
@@ -893,8 +905,8 @@ def validate_due_signals(df, now_ms: int):
             "[realtime_strategy] validation: "
             f"strategy={row['strategy']}, id={row['prediction_id']}, "
             f"predicted={predicted_direction}, actual={actual_direction}, correct={is_correct}, "
-            f"strategy_accuracy={strategy_accuracy:.4f}, "
-            f"strategy_samples={strategy_correct_count}/{strategy_total_count}"
+            f"official_accuracy={official_accuracy if official_accuracy is not None else 'n/a'}, "
+            f"official_samples={official_correct_count}/{official_total_count}"
         )
 
     save_pending_signals(remaining)

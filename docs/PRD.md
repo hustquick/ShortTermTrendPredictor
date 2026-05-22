@@ -525,6 +525,12 @@ PNG 是静态快照，不是实时窗口。
 
 强制观察预测不通知。
 
+验证通知中的准确率口径：
+
+- 只统计 `data/official_signals.csv` 中 `validation_status=validated` 的正式通知信号。
+- 不统计 `validated_strategy_signals.csv` 中的观察候选、强制方向预测或低置信记录。
+- 通知同时展示正式通知总准确率和该策略正式通知准确率。
+
 当前生产白名单：
 
 - `adaptive_rule_switch`
