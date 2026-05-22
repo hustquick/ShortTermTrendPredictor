@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from config import ALL_PREDICTIONS_CSV, OFFICIAL_SIGNALS_CSV
+from signal_quality import enrich_validation_quality
 
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
@@ -14,6 +15,7 @@ ALL_PREDICTION_COLUMNS = [
     "prediction_id",
     "timestamp",
     "strategy",
+    "market_regime",
     "current_price",
     "raw_direction",
     "final_direction",
@@ -26,7 +28,9 @@ ALL_PREDICTION_COLUMNS = [
     "validation_status",
     "actual_direction",
     "future_price",
+    "future_return",
     "is_correct",
+    "is_tradable_correct",
     "notify_enabled",
 ]
 
@@ -34,6 +38,7 @@ OFFICIAL_SIGNAL_COLUMNS = [
     "prediction_id",
     "timestamp",
     "strategy",
+    "market_regime",
     "current_price",
     "direction",
     "confidence",
@@ -45,7 +50,9 @@ OFFICIAL_SIGNAL_COLUMNS = [
     "validation_status",
     "actual_direction",
     "future_price",
+    "future_return",
     "is_correct",
+    "is_tradable_correct",
 ]
 
 
@@ -81,6 +88,7 @@ class PredictionOutputStore:
             self.record_official_signal(row)
 
     def record_validation(self, row: dict):
+        row = enrich_validation_quality(row)
         self.record_all_prediction(row)
         if _is_true(row.get("notify_enabled")):
             self.record_official_signal(row)
@@ -91,6 +99,7 @@ def _official_row(row: dict) -> dict:
         "prediction_id": row.get("prediction_id"),
         "timestamp": row.get("timestamp"),
         "strategy": row.get("strategy"),
+        "market_regime": row.get("market_regime"),
         "current_price": row.get("current_price"),
         "direction": row.get("raw_direction") or row.get("predicted_direction"),
         "confidence": row.get("confidence"),
@@ -102,7 +111,9 @@ def _official_row(row: dict) -> dict:
         "validation_status": row.get("validation_status"),
         "actual_direction": row.get("actual_direction"),
         "future_price": row.get("future_price"),
+        "future_return": row.get("future_return"),
         "is_correct": row.get("is_correct"),
+        "is_tradable_correct": row.get("is_tradable_correct"),
     }
 
 
@@ -119,6 +130,12 @@ def _read_csv_rows(path: Path) -> list[dict]:
 
 def _ensure_csv(path: Path, columns: list[str]):
     if path.exists() and path.stat().st_size > 0:
+        rows = _read_csv_rows(path)
+        if not rows:
+            return
+        current_columns = list(rows[0].keys())
+        if current_columns != columns:
+            _write_csv_rows(path, columns, rows)
         return
     _write_csv_rows(path, columns, [])
 
