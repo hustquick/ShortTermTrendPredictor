@@ -5,6 +5,22 @@ import pandas as pd
 from config import (
     ADAPTIVE_DUAL_MIN_CONFIDENCE,
     ADAPTIVE_DUAL_MIN_EDGE,
+    ADAPTIVE_RULE_SWITCH_MIN_SAMPLES,
+    ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
+    ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW,
+    ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE,
+    ADAPTIVE_RULE_SWITCH_MAX_CLOSE_POSITION,
+    ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY,
+    ADAPTIVE_RULE_SWITCH_MAX_VOLUME_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_MAX_VOLUME_ZSCORE,
+    ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_ZSCORE,
+    ADAPTIVE_RULE_SWITCH_MIN_RET_30,
+    ADAPTIVE_RULE_SWITCH_MIN_RSI_14,
+    ADAPTIVE_RULE_SWITCH_VOLUME_COOLDOWN_BARS,
+    DATA_DIR,
     ADAPTIVE_STRICT_ALLOW_DOWN,
     ADAPTIVE_STRICT_FILTER_ENABLED,
     ADAPTIVE_STRICT_LONG_MAX_BOLL_POSITION,
@@ -20,6 +36,9 @@ from finstar_scenario_layer import evaluate_finstar_scenario
 from high_win_rate_filter import passes_high_win_rate_filter
 from historical_match_filter import evaluate_historical_match
 from strategies.base import StrategyDecision, feature_value
+
+
+VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 
 
 def _short_rebound_trap_reason(features) -> str | None:
@@ -67,6 +86,14 @@ def _reject_trap(features, direction: str, confidence: float) -> StrategyDecisio
         if reason is not None:
             return StrategyDecision("no_trade", confidence, reason)
     return None
+
+
+def _reason_value(reason: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(reason).split(";"):
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return ""
 
 
 class BaselineDualStrategy:
@@ -315,6 +342,212 @@ class LongMomentumStrategy:
         return StrategyDecision("up", p_up, "long_momentum_confirmed")
 
 
+class AdaptiveRuleSwitchStrategy:
+    name = "adaptive_rule_switch"
+
+    def __init__(self):
+        self.records: list[dict] = []
+        self.volume_cooldown_remaining = 0
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        state = self._state_context(features, prediction, "down")
+        if state["volume_shock"]:
+            self.volume_cooldown_remaining = ADAPTIVE_RULE_SWITCH_VOLUME_COOLDOWN_BARS
+
+        if self.volume_cooldown_remaining > 0:
+            reason = (
+                "adaptive_rule_switch_volume_cooldown;"
+                f"adaptive_mode=cooldown;volume_regime={state['volume_regime']};"
+                f"volume_cooldown_remaining={self.volume_cooldown_remaining};"
+                f"{self._format_state_reason(state)}"
+            )
+            self.volume_cooldown_remaining -= 1
+            return StrategyDecision("no_trade", 0.0, reason)
+
+        candidates = self._candidate_rules(features, prediction)
+        if not candidates:
+            return StrategyDecision("no_trade", 0.0, "adaptive_rule_switch_no_candidate")
+
+        scored = []
+        for rule in candidates:
+            rule_key = f"{rule['name']}|volume_regime={state['volume_regime']}"
+            stats = self._rule_stats(rule_key)
+            scored.append({**rule, "rule_key": rule_key, **stats})
+
+        active = [
+            item for item in scored
+            if item["samples"] >= ADAPTIVE_RULE_SWITCH_MIN_SAMPLES
+            and item["win_rate"] >= ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE
+        ]
+        if active:
+            selected = sorted(active, key=lambda x: (x["win_rate"], x["samples"], x["confidence"]), reverse=True)[0]
+            mode = "active"
+        else:
+            selected = sorted(scored, key=lambda x: (x["samples"], x["confidence"]), reverse=True)[0]
+            mode = "explore"
+
+        reason = (
+            f"adaptive_rule_switch;adaptive_mode={mode};adaptive_rule={selected['name']};"
+            f"adaptive_rule_key={selected['rule_key']};"
+            f"rule_samples={selected['samples']};rule_win_rate={selected['win_rate']:.4f};"
+            f"rule_wins={selected['wins']};"
+            f"{self._state_reason(features, prediction, selected['direction'])}"
+        )
+        return StrategyDecision(selected["direction"], selected["confidence"], reason)
+
+    def _candidate_rules(self, features, prediction: dict) -> list[dict]:
+        p_up_raw = float(prediction.get("up_probability", 0.5))
+        p_up_signal = float(prediction.get("up_signal_probability", 0.0))
+        p_down_signal = float(prediction.get("down_signal_probability", 0.0))
+        ret_10 = feature_value(features, "ret_10")
+        ret_30 = feature_value(features, "ret_30")
+        macd_hist = feature_value(features, "macd_hist")
+        boll_position = feature_value(features, "boll_position", 0.5)
+        close_position = feature_value(features, "close_position", 0.5)
+        trend = feature_value(features, "trend_agreement")
+
+        rules = []
+
+        def add(ok: bool, name: str, direction: str, confidence: float):
+            if ok:
+                rules.append({"name": name, "direction": direction, "confidence": float(confidence)})
+
+        add(p_up_raw <= 0.45, "short_pup_le_045", "down", max(p_down_signal, 1.0 - p_up_raw))
+        add(
+            p_up_raw <= 0.50 and boll_position > 0.10,
+            "short_pup_le_050_not_low",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.45 and ret_30 <= 0 and trend < 0,
+            "short_pup_le_045_ret30neg_trenddown",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.98 and boll_position < 0.85,
+            "long_pup_ge_098_not_high",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.85 and ret_30 >= 0 and macd_hist <= 0 and close_position < 0.95,
+            "long_pup_ge_085_ret30pos_macdneg_closeok",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.55 and boll_position < 0.85,
+            "long_pup_ge_055_not_high",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        return rules
+
+    def _state_reason(self, features, prediction: dict, direction: str) -> str:
+        return self._format_state_reason(self._state_context(features, prediction, direction))
+
+    def _state_context(self, features, prediction: dict, direction: str) -> dict:
+        p_up_raw = float(prediction.get("up_probability", 0.5))
+        ret_30 = feature_value(features, "ret_30")
+        rsi_14 = feature_value(features, "rsi_14", 50.0)
+        close_position = feature_value(features, "close_position", 0.5)
+        volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+        quote_volume_ratio_10 = feature_value(features, "quote_volume_ratio_10", 1.0)
+        trade_count_ratio_10 = feature_value(features, "trade_count_ratio_10", 1.0)
+        volume_zscore = feature_value(features, "volume_zscore", 0.0)
+        volume_change = feature_value(features, "volume_change", 0.0)
+
+        directional_state_ok = (
+            direction == "down"
+            and p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
+            and rsi_14 > ADAPTIVE_RULE_SWITCH_MIN_RSI_14
+            and ret_30 > ADAPTIVE_RULE_SWITCH_MIN_RET_30
+            and close_position < ADAPTIVE_RULE_SWITCH_MAX_CLOSE_POSITION
+        )
+        volume_shock = (
+            volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_VOLUME_RATIO_10
+            or quote_volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10
+            or trade_count_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10
+            or volume_zscore >= ADAPTIVE_RULE_SWITCH_MAX_VOLUME_ZSCORE
+            or abs(volume_change) >= ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE
+        )
+        if volume_shock:
+            volume_regime = "shock"
+        elif (
+            volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_RATIO_10
+            or quote_volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_RATIO_10
+            or trade_count_ratio_10 >= ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_RATIO_10
+            or volume_zscore >= ADAPTIVE_RULE_SWITCH_ELEVATED_VOLUME_ZSCORE
+        ):
+            volume_regime = "elevated"
+        else:
+            volume_regime = "normal"
+        state_ok = directional_state_ok and not volume_shock
+        return {
+            "state_ok": state_ok,
+            "directional_state_ok": directional_state_ok,
+            "volume_shock": volume_shock,
+            "volume_regime": volume_regime,
+            "p_up_raw": p_up_raw,
+            "rsi_14": rsi_14,
+            "ret_30": ret_30,
+            "close_position": close_position,
+            "volume_ratio_10": volume_ratio_10,
+            "quote_volume_ratio_10": quote_volume_ratio_10,
+            "trade_count_ratio_10": trade_count_ratio_10,
+            "volume_zscore": volume_zscore,
+            "volume_change": volume_change,
+        }
+
+    def _format_state_reason(self, state: dict) -> str:
+        return (
+            f"state_ok={str(state['state_ok'])};directional_state_ok={str(state['directional_state_ok'])};"
+            f"volume_shock={str(state['volume_shock'])};volume_regime={state['volume_regime']};"
+            f"raw_up_probability={state['p_up_raw']:.4f};"
+            f"state_rsi_14={state['rsi_14']:.4f};state_ret_30={state['ret_30']:.6f};"
+            f"state_close_position={state['close_position']:.4f};"
+            f"volume_ratio_10={state['volume_ratio_10']:.4f};"
+            f"quote_volume_ratio_10={state['quote_volume_ratio_10']:.4f};"
+            f"trade_count_ratio_10={state['trade_count_ratio_10']:.4f};"
+            f"volume_zscore={state['volume_zscore']:.4f};"
+            f"volume_change={state['volume_change']:.4f}"
+        )
+
+    def _rule_stats(self, rule_key: str) -> dict:
+        if self.records:
+            rows = [row for row in self.records if row.get("rule_key") == rule_key][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
+            samples = len(rows)
+            if samples == 0:
+                return {"samples": 0, "wins": 0, "win_rate": 0.0}
+            wins = sum(bool(row.get("correct")) for row in rows)
+            return {"samples": samples, "wins": wins, "win_rate": float(wins / samples)}
+        if not VALIDATED_STRATEGY_SIGNALS.exists() or VALIDATED_STRATEGY_SIGNALS.stat().st_size == 0:
+            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+        try:
+            df = pd.read_csv(VALIDATED_STRATEGY_SIGNALS)
+        except Exception:
+            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+        if df.empty or "reason" not in df.columns:
+            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+        rows = df[
+            (df.get("strategy") == self.name)
+            & df["reason"].fillna("").astype(str).str.contains(f"adaptive_rule_key={rule_key}", regex=False)
+        ].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
+        samples = int(len(rows))
+        if samples == 0:
+            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+        wins = int(rows["correct"].astype(str).str.lower().eq("true").sum())
+        return {"samples": samples, "wins": wins, "win_rate": float(wins / samples)}
+
+    def observe_result(self, decision: StrategyDecision, correct: bool):
+        rule_key = _reason_value(decision.reason, "adaptive_rule_key")
+        if not rule_key:
+            return
+        self.records.append({"rule_key": rule_key, "correct": bool(correct)})
+
+
 class HistoricalMatchStrategy:
     name = "historical_match"
 
@@ -513,6 +746,7 @@ def default_strategies():
         AdaptiveDualStrategy(),
         ShortMomentumStrategy(),
         LongMomentumStrategy(),
+        AdaptiveRuleSwitchStrategy(),
         RelaxedScenarioStrategy(),
         HistoricalMatchStrategy(),
         HistoricalMatchLongStrategy(),

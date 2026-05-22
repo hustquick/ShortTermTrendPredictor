@@ -44,6 +44,7 @@ from historical_match_filter import build_walk_forward_historical_match_rows
 from kronos_adapter import KronosAdapter, KronosForecastResult
 from strategy_learning import build_learning_state, feature_signature, learning_decision
 from strategies.rules import (
+    AdaptiveRuleSwitchStrategy,
     AdaptiveDualStrategy,
     FinStarScenarioStrategy,
     HistoricalMatchLongStrategy,
@@ -58,6 +59,7 @@ from strategies.rules import (
 
 STRATEGY_MAP = {
     "short_momentum": ShortMomentumStrategy,
+    "adaptive_rule_switch": AdaptiveRuleSwitchStrategy,
     "adaptive_dual": AdaptiveDualStrategy,
     "relaxed_scenario": RelaxedScenarioStrategy,
     "historical_match": HistoricalMatchStrategy,
@@ -292,6 +294,7 @@ def append_validated_signal(row: dict):
         "up_signal_probability",
         "down_signal_probability",
         "direction_edge",
+        "reason",
         "feature_signature",
         "learning_state",
         "learning_reason",
@@ -340,6 +343,14 @@ def _extract_reason_float(reason: str, key: str) -> float | None:
     return None
 
 
+def _extract_reason_value(reason: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(reason).split(";"):
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return ""
+
+
 def passes_production_quality_gate(
     strategy_name: str,
     raw_direction: str,
@@ -358,6 +369,24 @@ def passes_production_quality_gate(
             confirmations = (quality_context or {}).get("confirmations", {})
             if not confirmations.get(raw_direction, False):
                 return False, "production_blocked;adaptive_missing_external_confirmation"
+        return True, "production_quality_passed"
+
+    if strategy_name == "adaptive_rule_switch":
+        mode = _extract_reason_value(reason, "adaptive_mode")
+        samples = _extract_reason_float(reason, "rule_samples") or 0.0
+        win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
+        state_ok = _extract_reason_value(reason, "state_ok")
+        volume_shock = _extract_reason_value(reason, "volume_shock")
+        if mode != "active":
+            return False, "production_blocked;adaptive_rule_switch_exploring"
+        if samples < 5:
+            return False, "production_blocked;adaptive_rule_switch_samples_below_5"
+        if win_rate < 0.70:
+            return False, "production_blocked;adaptive_rule_switch_win_rate_below_0.70"
+        if state_ok != "True":
+            if volume_shock == "True":
+                return False, "production_blocked;adaptive_rule_switch_volume_shock"
+            return False, "production_blocked;adaptive_rule_switch_state_blocked"
         return True, "production_quality_passed"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
@@ -767,6 +796,7 @@ def validate_due_signals(df, now_ms: int):
                 "up_signal_probability": row.get("up_signal_probability"),
                 "down_signal_probability": row.get("down_signal_probability"),
                 "direction_edge": row.get("direction_edge"),
+                "reason": row.get("reason"),
                 "feature_signature": row.get("feature_signature"),
                 "learning_state": row.get("learning_state"),
                 "learning_reason": row.get("learning_reason"),
@@ -898,6 +928,13 @@ def register_prediction_signal(
         raw_direction,
         features,
     )
+    if (
+        strategy_name == "adaptive_rule_switch"
+        and _extract_reason_value(decision.reason, "adaptive_mode") == "active"
+    ):
+        learning.notify = True
+        learning.state = "delegated_to_rule_switch"
+        learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
     reason = f"{decision.reason};{learning.reason}"
     quality_ok, quality_reason = passes_production_quality_gate(
         strategy_name=strategy_name,

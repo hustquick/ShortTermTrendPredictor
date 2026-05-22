@@ -11,6 +11,7 @@ DEFAULT_STRATEGIES = (
 
 OBSERVATION_STRATEGIES = (
     "short_momentum,"
+    "adaptive_rule_switch,"
     "adaptive_dual,"
     "relaxed_scenario,"
     "historical_match,"
