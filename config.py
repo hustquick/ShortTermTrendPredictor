@@ -82,6 +82,10 @@ PREDICT_HORIZON_MS = PREDICT_HORIZON_MINUTES * INTERVAL_MS
 USE_LABEL_NEUTRAL_ZONE = True
 LABEL_NEUTRAL_THRESHOLD = 0.0005
 
+# 方向正确只是基础验证；正式质量评估还要求未来涨跌幅超过该阈值。
+# 0.0008 表示 0.08%，用于过滤方向对但波动太小、不值得通知和跟踪的信号。
+TRADABLE_RETURN_THRESHOLD = 0.0008
+
 # =========================
 # 信号阈值配置
 # =========================
@@ -218,28 +222,8 @@ PROB_BIN_WIDTH = 0.05
 MIN_SIGNALS_FOR_THRESHOLD_SEARCH = 30
 
 STRICT_PARAM_SEARCH_ENABLED = True
-STRICT_PARAM_SEARCH_LONG_THRESHOLDS = [
-    0.55,
-    0.60,
-    0.65,
-    0.70,
-    0.75,
-    0.80,
-    0.85,
-    0.90,
-    0.95,
-]
-STRICT_PARAM_SEARCH_SHORT_THRESHOLDS = [
-    0.45,
-    0.40,
-    0.35,
-    0.30,
-    0.25,
-    0.20,
-    0.15,
-    0.10,
-    0.05,
-]
+STRICT_PARAM_SEARCH_LONG_THRESHOLDS = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+STRICT_PARAM_SEARCH_SHORT_THRESHOLDS = [0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05]
 STRICT_PARAM_SEARCH_TOP_N = 20
 
 STRICT_PARAM_RECOMMEND_MIN_SIGNALS = 300
@@ -256,137 +240,20 @@ DUAL_MODEL_TUNE_VALID_RATIO = 0.30
 DUAL_MODEL_TUNE_MAX_TRIALS_PER_SIDE = 30
 DUAL_MODEL_TUNE_MIN_VALID_SIGNALS = 30
 DUAL_MODEL_TUNE_MIN_WIN_RATE = 0.70
-DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS = [
-    0.70,
-    0.75,
-    0.80,
-    0.85,
-    0.90,
-    0.95,
-]
+DUAL_MODEL_TUNE_SIGNAL_THRESHOLDS = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 
 DUAL_MODEL_PARAM_GRID = [
-    {
-        "n_estimators": 120,
-        "learning_rate": 0.06,
-        "max_depth": 3,
-        "num_leaves": 7,
-        "min_child_samples": 120,
-        "subsample": 0.75,
-        "colsample_bytree": 0.75,
-        "reg_alpha": 0.30,
-        "reg_lambda": 3.00,
-    },
-    {
-        "n_estimators": 160,
-        "learning_rate": 0.05,
-        "max_depth": 3,
-        "num_leaves": 7,
-        "min_child_samples": 80,
-        "subsample": 0.80,
-        "colsample_bytree": 0.80,
-        "reg_alpha": 0.20,
-        "reg_lambda": 2.00,
-    },
-    {
-        "n_estimators": 220,
-        "learning_rate": 0.04,
-        "max_depth": 4,
-        "num_leaves": 15,
-        "min_child_samples": 60,
-        "subsample": 0.85,
-        "colsample_bytree": 0.85,
-        "reg_alpha": 0.15,
-        "reg_lambda": 1.50,
-    },
-    {
-        "n_estimators": 320,
-        "learning_rate": 0.035,
-        "max_depth": 5,
-        "num_leaves": 31,
-        "min_child_samples": 40,
-        "subsample": 0.90,
-        "colsample_bytree": 0.90,
-        "reg_alpha": 0.10,
-        "reg_lambda": 1.00,
-    },
-    {
-        "n_estimators": 500,
-        "learning_rate": 0.03,
-        "max_depth": 6,
-        "num_leaves": 31,
-        "min_child_samples": 25,
-        "subsample": 0.95,
-        "colsample_bytree": 0.95,
-        "reg_alpha": 0.05,
-        "reg_lambda": 0.50,
-    },
-    {
-        "n_estimators": 650,
-        "learning_rate": 0.025,
-        "max_depth": 7,
-        "num_leaves": 63,
-        "min_child_samples": 15,
-        "subsample": 0.95,
-        "colsample_bytree": 0.95,
-        "reg_alpha": 0.02,
-        "reg_lambda": 0.25,
-    },
-    {
-        "n_estimators": 800,
-        "learning_rate": 0.035,
-        "max_depth": 8,
-        "num_leaves": 63,
-        "min_child_samples": 10,
-        "subsample": 1.00,
-        "colsample_bytree": 1.00,
-        "reg_alpha": 0.00,
-        "reg_lambda": 0.00,
-    },
-    {
-        "n_estimators": 200,
-        "learning_rate": 0.06,
-        "max_depth": 4,
-        "num_leaves": 20,
-        "min_child_samples": 50,
-        "subsample": 0.90,
-        "colsample_bytree": 0.90,
-        "reg_alpha": 0.10,
-        "reg_lambda": 0.80,
-    },
-    {
-        "n_estimators": 350,
-        "learning_rate": 0.04,
-        "max_depth": 5,
-        "num_leaves": 40,
-        "min_child_samples": 30,
-        "subsample": 0.85,
-        "colsample_bytree": 0.85,
-        "reg_alpha": 0.08,
-        "reg_lambda": 0.80,
-    },
-    {
-        "n_estimators": 500,
-        "learning_rate": 0.02,
-        "max_depth": 6,
-        "num_leaves": 60,
-        "min_child_samples": 20,
-        "subsample": 0.90,
-        "colsample_bytree": 0.90,
-        "reg_alpha": 0.05,
-        "reg_lambda": 0.50,
-    },
-    {
-        "n_estimators": 700,
-        "learning_rate": 0.015,
-        "max_depth": 8,
-        "num_leaves": 80,
-        "min_child_samples": 10,
-        "subsample": 0.95,
-        "colsample_bytree": 0.95,
-        "reg_alpha": 0.05,
-        "reg_lambda": 0.25,
-    },
+    {"n_estimators": 120, "learning_rate": 0.06, "max_depth": 3, "num_leaves": 7, "min_child_samples": 120, "subsample": 0.75, "colsample_bytree": 0.75, "reg_alpha": 0.30, "reg_lambda": 3.00},
+    {"n_estimators": 160, "learning_rate": 0.05, "max_depth": 3, "num_leaves": 7, "min_child_samples": 80, "subsample": 0.80, "colsample_bytree": 0.80, "reg_alpha": 0.20, "reg_lambda": 2.00},
+    {"n_estimators": 220, "learning_rate": 0.04, "max_depth": 4, "num_leaves": 15, "min_child_samples": 60, "subsample": 0.85, "colsample_bytree": 0.85, "reg_alpha": 0.15, "reg_lambda": 1.50},
+    {"n_estimators": 320, "learning_rate": 0.035, "max_depth": 5, "num_leaves": 31, "min_child_samples": 40, "subsample": 0.90, "colsample_bytree": 0.90, "reg_alpha": 0.10, "reg_lambda": 1.00},
+    {"n_estimators": 500, "learning_rate": 0.03, "max_depth": 6, "num_leaves": 31, "min_child_samples": 25, "subsample": 0.95, "colsample_bytree": 0.95, "reg_alpha": 0.05, "reg_lambda": 0.50},
+    {"n_estimators": 650, "learning_rate": 0.025, "max_depth": 7, "num_leaves": 63, "min_child_samples": 15, "subsample": 0.95, "colsample_bytree": 0.95, "reg_alpha": 0.02, "reg_lambda": 0.25},
+    {"n_estimators": 800, "learning_rate": 0.035, "max_depth": 8, "num_leaves": 63, "min_child_samples": 10, "subsample": 1.00, "colsample_bytree": 1.00, "reg_alpha": 0.00, "reg_lambda": 0.00},
+    {"n_estimators": 200, "learning_rate": 0.06, "max_depth": 4, "num_leaves": 20, "min_child_samples": 50, "subsample": 0.90, "colsample_bytree": 0.90, "reg_alpha": 0.10, "reg_lambda": 0.80},
+    {"n_estimators": 350, "learning_rate": 0.04, "max_depth": 5, "num_leaves": 40, "min_child_samples": 30, "subsample": 0.85, "colsample_bytree": 0.85, "reg_alpha": 0.08, "reg_lambda": 0.80},
+    {"n_estimators": 500, "learning_rate": 0.02, "max_depth": 6, "num_leaves": 60, "min_child_samples": 20, "subsample": 0.90, "colsample_bytree": 0.90, "reg_alpha": 0.05, "reg_lambda": 0.50},
+    {"n_estimators": 700, "learning_rate": 0.015, "max_depth": 8, "num_leaves": 80, "min_child_samples": 10, "subsample": 0.95, "colsample_bytree": 0.95, "reg_alpha": 0.05, "reg_lambda": 0.25},
 ]
 
 # =========================
@@ -408,10 +275,12 @@ CSV_COLUMNS = [
     "timestamp",
     "current_price",
     "future_price",
+    "future_return",
     "predicted_direction",
     "actual_direction",
     "up_probability",
     "confidence",
     "is_valid_signal",
     "is_correct",
+    "is_tradable_correct",
 ]
