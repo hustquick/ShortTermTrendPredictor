@@ -155,11 +155,6 @@ RETRAIN_INTERVAL_SECONDS = 30 * 60
 # 企业微信通知白名单。列入的策略产生 up/down 信号时会推送预测和验证通知。
 OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = (
     "adaptive_rule_switch",
-    "adaptive_dual",
-    "historical_match",
-    "historical_match_short",
-    "kronos_confirm",
-    "kronos_lead",
 )
 HISTORICAL_MATCH_WALK_FORWARD_MODEL_UPDATE_MINUTES = 120
 HISTORICAL_MATCH_CACHE_MAX_AGE_MINUTES = 30

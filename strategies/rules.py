@@ -438,7 +438,10 @@ class AdaptiveRuleSwitchStrategy:
 
     def _rule_stats(self, rule_name: str) -> dict:
         if self.records:
-            rows = [row for row in self.records if row.get("rule") == rule_name][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
+            rows = [
+                row for row in self.records
+                if row.get("rule") == rule_name and row.get("state_ok")
+            ][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
             samples = len(rows)
             if samples == 0:
                 return {"samples": 0, "wins": 0, "win_rate": 0.0}
@@ -455,6 +458,7 @@ class AdaptiveRuleSwitchStrategy:
         rows = df[
             (df.get("strategy") == self.name)
             & df["reason"].fillna("").astype(str).str.contains(f"adaptive_rule={rule_name}", regex=False)
+            & df["reason"].fillna("").astype(str).str.contains("state_ok=True", regex=False)
         ].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
         samples = int(len(rows))
         if samples == 0:
@@ -466,7 +470,11 @@ class AdaptiveRuleSwitchStrategy:
         rule = _reason_value(decision.reason, "adaptive_rule")
         if not rule:
             return
-        self.records.append({"rule": rule, "correct": bool(correct)})
+        self.records.append({
+            "rule": rule,
+            "state_ok": _reason_value(decision.reason, "state_ok") == "True",
+            "correct": bool(correct),
+        })
 
 
 class HistoricalMatchStrategy:

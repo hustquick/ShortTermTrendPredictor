@@ -453,7 +453,7 @@ data/strategy_learning_state.json
 - `STRATEGY_LEARNING_ENABLE_WIN_RATE`
 - `STRATEGY_LEARNING_FEATURE_BLOCK_MIN_ERRORS`
 
-当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。当前生产白名单保留 `adaptive_rule_switch`、`historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive、adaptive_rule_switch 和 Kronos 额外收紧正式通知门槛。
+当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。当前无 Volume 状态门控版本的生产白名单只保留 `adaptive_rule_switch`，其它策略继续观察记录但不推送。
 
 ## 12. 输出文件
 
@@ -528,15 +528,10 @@ PNG 是静态快照，不是实时窗口。
 当前生产白名单：
 
 - `adaptive_rule_switch`
-- `historical_match`
-- `historical_match_short`
-- `adaptive_dual`
-- `kronos_confirm`
-- `kronos_lead`
 
 额外生产质量门槛：
 
-- `adaptive_rule_switch`：必须处于 `adaptive_mode=active`，滚动规则样本数和胜率达标，且 `state_ok=True`。
+- `adaptive_rule_switch`：必须处于 `adaptive_mode=active`，滚动规则样本数和胜率达标，且 `state_ok=True`；规则滚动胜率只统计同规则且 `state_ok=True` 的历史验证结果；不允许绕过自学习通知门控。
 - `adaptive_dual`：`confidence >= 0.75`、`abs(direction_edge) >= 0.50`，且同方向必须有历史匹配策略或高置信 Kronos 策略二次确认。
 - `kronos_confirm` / `kronos_lead`：只允许做多正式通知，且 `kronos_conf >= 0.10`。
 - `kronos_lead`：允许领先，但不能逆着明显双子模型方向；当前反向 edge 容忍度为 `0.05`。

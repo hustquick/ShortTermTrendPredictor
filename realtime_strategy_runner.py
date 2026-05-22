@@ -15,6 +15,7 @@ from config import (
     ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION,
     ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
     ADAPTIVE_NOTIFY_MIN_EDGE,
+    ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
     DATA_DIR,
     ALL_PREDICTIONS_CSV,
     HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
@@ -380,8 +381,8 @@ def passes_production_quality_gate(
             return False, "production_blocked;adaptive_rule_switch_exploring"
         if samples < 5:
             return False, "production_blocked;adaptive_rule_switch_samples_below_5"
-        if win_rate < 0.70:
-            return False, "production_blocked;adaptive_rule_switch_win_rate_below_0.70"
+        if win_rate < ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:
+            return False, f"production_blocked;adaptive_rule_switch_win_rate_below_{ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:.2f}"
         if state_ok != "True":
             return False, "production_blocked;adaptive_rule_switch_state_blocked"
         return True, "production_quality_passed"
@@ -925,13 +926,6 @@ def register_prediction_signal(
         raw_direction,
         features,
     )
-    if (
-        strategy_name == "adaptive_rule_switch"
-        and _extract_reason_value(decision.reason, "adaptive_mode") == "active"
-    ):
-        learning.notify = True
-        learning.state = "delegated_to_rule_switch"
-        learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
     reason = f"{decision.reason};{learning.reason}"
     quality_ok, quality_reason = passes_production_quality_gate(
         strategy_name=strategy_name,
