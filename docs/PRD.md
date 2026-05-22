@@ -293,6 +293,7 @@ StrategyDecision(direction, confidence, reason)
 `realtime_strategy_runner.py` 当前可运行策略：
 
 - `short_momentum`
+- `adaptive_rule_switch`
 - `adaptive_dual`
 - `relaxed_scenario`
 - `historical_match`
@@ -358,6 +359,22 @@ Kronos 风险：
 
 - 不能只凭模型高置信放行。
 - 需结合历史相似验证。
+
+### 8.6 自适应规则切换策略
+
+`adaptive_rule_switch` 是当前用于提高少量正式信号胜率的滚动启用策略。
+
+长期独立验证结论：
+
+- 不含成交量的核心状态门控为：`up_probability <= 0.285`、`rsi_14 > 47.5`、`ret_30 > -0.00013`。
+- 在两个 90 天严格回测文件上，该状态门控分别达到约 81.6% 和 82.1% 胜率，样本约 3060 条。
+- 该规则当前只作为高质量空头状态门控，不泛化到多头。
+
+实时生产门控：
+
+- 候选规则必须在自身滚动窗口内满足 `rule_samples >= 5` 且 `rule_win_rate >= 0.80` 才进入 active。
+- 生产通知还必须满足状态门控，即 `state_ok=True`。
+- 该标记版本故意不引入 Volume、`close_position` 或其他二级过滤器，便于单独复现实验结论。
 
 ## 9. 实时多策略流程
 
@@ -436,7 +453,7 @@ data/strategy_learning_state.json
 - `STRATEGY_LEARNING_ENABLE_WIN_RATE`
 - `STRATEGY_LEARNING_FEATURE_BLOCK_MIN_ERRORS`
 
-当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。当前生产白名单保留 `historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive 和 Kronos 额外收紧正式通知门槛。
+当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。当前生产白名单保留 `adaptive_rule_switch`、`historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive、adaptive_rule_switch 和 Kronos 额外收紧正式通知门槛。
 
 ## 12. 输出文件
 
@@ -510,6 +527,7 @@ PNG 是静态快照，不是实时窗口。
 
 当前生产白名单：
 
+- `adaptive_rule_switch`
 - `historical_match`
 - `historical_match_short`
 - `adaptive_dual`
@@ -518,6 +536,7 @@ PNG 是静态快照，不是实时窗口。
 
 额外生产质量门槛：
 
+- `adaptive_rule_switch`：必须处于 `adaptive_mode=active`，滚动规则样本数和胜率达标，且 `state_ok=True`。
 - `adaptive_dual`：`confidence >= 0.75`、`abs(direction_edge) >= 0.50`，且同方向必须有历史匹配策略或高置信 Kronos 策略二次确认。
 - `kronos_confirm` / `kronos_lead`：只允许做多正式通知，且 `kronos_conf >= 0.10`。
 - `kronos_lead`：允许领先，但不能逆着明显双子模型方向；当前反向 edge 容忍度为 `0.05`。

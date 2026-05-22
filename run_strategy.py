@@ -34,6 +34,7 @@ from trainer import ProbabilityStabilityFilter, train_overfit_model, train_valid
 
 BACKTEST_STRATEGIES = (
     "short_momentum",
+    "adaptive_rule_switch",
     "adaptive_dual",
     "relaxed_scenario",
     "historical_match",
@@ -429,13 +430,14 @@ def strict_walk_forward_backtest(
 
             for strategy in strategies:
                 decision = strategy.decide(feature_row, pred)
-                strategy_decisions.append((strategy.name, decision))
+                strategy_decisions.append((strategy, decision))
 
-            quality_context = _build_quality_context(strategy_decisions)
+            quality_context = _build_quality_context([(strategy.name, decision) for strategy, decision in strategy_decisions])
             official_count = 0
             final_count = 0
 
-            for strategy_name, decision in strategy_decisions:
+            for strategy, decision in strategy_decisions:
+                strategy_name = strategy.name
                 p_up = float(pred.get("up_signal_probability", 0.0))
                 p_down = float(pred.get("down_signal_probability", 0.0))
                 raw_pred_dir = (
@@ -445,6 +447,13 @@ def strict_walk_forward_backtest(
                 )
                 final_direction = decision.direction
                 learning = learning_gate.decide(strategy_name, raw_pred_dir)
+                if (
+                    strategy_name == "adaptive_rule_switch"
+                    and "adaptive_mode=active" in str(decision.reason)
+                ):
+                    learning.notify = True
+                    learning.state = "delegated_to_rule_switch"
+                    learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
                 reason = f"{decision.reason};{learning.reason}"
                 quality_ok, quality_reason = passes_production_quality_gate(
                     strategy_name=strategy_name,
@@ -467,6 +476,8 @@ def strict_walk_forward_backtest(
                 if final_direction in {"up", "down"}:
                     final_count += 1
                     learning_gate.observe(strategy_name, raw_pred_dir, is_correct)
+                    if hasattr(strategy, "observe_result"):
+                        strategy.observe_result(decision, is_correct)
                 if notify_enabled:
                     official_count += 1
 

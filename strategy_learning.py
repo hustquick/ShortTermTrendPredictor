@@ -38,6 +38,15 @@ def _is_true(value) -> bool:
     return str(value).lower() == "true"
 
 
+def _row_correct(row: dict) -> bool:
+    for column in ("tradable_correct", "is_tradable_correct", "correct"):
+        value = row.get(column)
+        if value is None or str(value) == "" or str(value).lower() == "nan":
+            continue
+        return _is_true(value)
+    return False
+
+
 def _feature_signature(features) -> str:
     ret_10 = feature_value(features, "ret_10")
     ret_30 = feature_value(features, "ret_30")
@@ -68,6 +77,8 @@ def _load_validated(path: Path) -> pd.DataFrame:
     funnel_df = _load_csv(SIGNAL_FUNNEL_CSV)
     if not funnel_df.empty:
         funnel_df = funnel_df[funnel_df.get("future_price", "") != ""].copy()
+        if "final_direction" in funnel_df.columns:
+            funnel_df = funnel_df[funnel_df["final_direction"].isin(["up", "down"])].copy()
         if "raw_direction" in funnel_df.columns:
             funnel_df["predicted_direction"] = funnel_df["raw_direction"]
         if "is_tradable_correct" in funnel_df.columns:
@@ -90,6 +101,20 @@ def _correct_metric_column(df: pd.DataFrame) -> str:
     return "correct"
 
 
+def _correct_metric_series(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=bool)
+
+    values = pd.Series([""] * len(df), index=df.index, dtype=object)
+    for column in ("tradable_correct", "is_tradable_correct", "correct"):
+        if column not in df.columns:
+            continue
+        column_values = df[column]
+        usable = column_values.notna() & (column_values.astype(str) != "")
+        values.loc[usable & (values.astype(str) == "")] = column_values.loc[usable]
+    return values.map(_is_true)
+
+
 def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNING_STATE_FILE) -> dict:
     df = _load_validated(validated_csv)
     state = {
@@ -110,8 +135,7 @@ def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNI
         _write_state(state_file, state)
         return state
 
-    metric_col = _correct_metric_column(df)
-    df["correct_bool"] = df[metric_col].map(_is_true)
+    df["correct_bool"] = _correct_metric_series(df)
     if "market_regime" not in df.columns:
         df["market_regime"] = "unknown"
     df["market_regime"] = df["market_regime"].fillna("unknown").replace("", "unknown")
@@ -169,7 +193,7 @@ def _recent_error_signature_count(validated_csv: Path, strategy: str, direction:
             continue
         if row.get("predicted_direction") != direction:
             continue
-        if _is_true(row.get("tradable_correct", row.get("is_tradable_correct", row.get("correct")))):
+        if _row_correct(row):
             continue
         if row.get("feature_signature") == signature:
             count += 1
