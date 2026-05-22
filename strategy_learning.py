@@ -12,6 +12,7 @@ import pandas as pd
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
 from config import (
+    DATA_DIR,
     ENABLE_STRATEGY_SELF_LEARNING,
     STRATEGY_LEARNING_DISABLE_WIN_RATE,
     STRATEGY_LEARNING_ENABLE_WIN_RATE,
@@ -22,6 +23,8 @@ from config import (
 )
 from market_regime import classify_market_regime
 from strategies.base import feature_value
+
+SIGNAL_FUNNEL_CSV = DATA_DIR / "signal_funnel.csv"
 
 
 @dataclass
@@ -54,14 +57,32 @@ def _feature_signature(features) -> str:
     return "|".join(parts)
 
 
-def _load_validated(path: Path) -> pd.DataFrame:
+def _load_csv(path: Path) -> pd.DataFrame:
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
     return pd.read_csv(path)
 
 
+def _load_validated(path: Path) -> pd.DataFrame:
+    df = _load_csv(path)
+    funnel_df = _load_csv(SIGNAL_FUNNEL_CSV)
+    if not funnel_df.empty:
+        funnel_df = funnel_df[funnel_df.get("future_price", "") != ""].copy()
+        if "raw_direction" in funnel_df.columns:
+            funnel_df["predicted_direction"] = funnel_df["raw_direction"]
+        if "is_tradable_correct" in funnel_df.columns:
+            funnel_df["tradable_correct"] = funnel_df["is_tradable_correct"]
+        if "timestamp" in funnel_df.columns and "signal_time" not in funnel_df.columns:
+            funnel_df["signal_time"] = funnel_df["timestamp"]
+    if df.empty:
+        return funnel_df
+    if funnel_df.empty:
+        return df
+    all_cols = sorted(set(df.columns) | set(funnel_df.columns))
+    return pd.concat([df.reindex(columns=all_cols), funnel_df.reindex(columns=all_cols)], ignore_index=True)
+
+
 def _correct_metric_column(df: pd.DataFrame) -> str:
-    """Prefer tradable correctness when the validated log has it."""
     if "tradable_correct" in df.columns:
         return "tradable_correct"
     if "is_tradable_correct" in df.columns:
@@ -80,7 +101,7 @@ def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNI
         "strategy_direction_regime": {},
         "feature_errors": {},
     }
-    if df.empty:
+    if df.empty or "predicted_direction" not in df.columns:
         _write_state(state_file, state)
         return state
 
@@ -93,6 +114,7 @@ def build_learning_state(validated_csv: Path, state_file: Path = STRATEGY_LEARNI
     df["correct_bool"] = df[metric_col].map(_is_true)
     if "market_regime" not in df.columns:
         df["market_regime"] = "unknown"
+    df["market_regime"] = df["market_regime"].fillna("unknown").replace("", "unknown")
 
     for (strategy, direction), group in df.groupby(["strategy", "predicted_direction"]):
         _fill_state_item(state["strategy_direction"], f"{strategy}:{direction}", strategy, direction, "all", group)
@@ -136,23 +158,12 @@ def _write_state(path: Path, state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def _load_state(path: Path) -> dict:
-    if not path.exists() or path.stat().st_size == 0:
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return {}
-
-
 def _recent_error_signature_count(validated_csv: Path, strategy: str, direction: str, signature: str) -> int:
-    if not validated_csv.exists() or validated_csv.stat().st_size == 0:
+    df = _load_validated(validated_csv)
+    if df.empty:
         return 0
+    rows = df.tail(STRATEGY_LEARNING_ROLLING_WINDOW * 4).to_dict("records")
     count = 0
-    with open(validated_csv, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)[-STRATEGY_LEARNING_ROLLING_WINDOW * 4 :]
     for row in rows:
         if row.get("strategy") != strategy:
             continue
