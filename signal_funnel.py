@@ -96,6 +96,21 @@ def _upsert(path: Path, columns: list[str], row: dict, key: str = "prediction_id
     _write_rows(path, columns, next_rows)
 
 
+def _extract_reason_value(reason: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(reason).split(";"):
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return ""
+
+
+def _infer_market_regime(row: dict) -> str:
+    if row.get("market_regime"):
+        return row.get("market_regime")
+    reason = row.get("reason") or row.get("learning_reason") or ""
+    return _extract_reason_value(reason, "regime") or "unknown"
+
+
 def infer_blocked_stage(row: dict) -> str:
     if _is_true(row.get("notify_enabled")):
         return "passed"
@@ -108,6 +123,25 @@ def infer_blocked_stage(row: dict) -> str:
     if not _is_true(row.get("quality_passed")):
         return "quality"
     return "risk_gate"
+
+
+def _normalize_funnel_row(row: dict) -> dict:
+    out = dict(row)
+    reason = str(out.get("reason", ""))
+    raw_direction = out.get("raw_direction") or out.get("predicted_direction") or out.get("direction")
+    final_direction = out.get("final_direction") or raw_direction
+    out["raw_direction"] = raw_direction
+    out["final_direction"] = final_direction
+    out["market_regime"] = _infer_market_regime(out)
+    out.setdefault("candidate_passed", raw_direction in {"up", "down"})
+    out.setdefault("trap_passed", not reason.startswith(("long_chase_trap", "short_rebound_trap")))
+    out.setdefault("allowlist_passed", "not_official_strategy" not in reason)
+    out.setdefault("learning_passed", "learning_explore" not in reason and "learning_disabled" not in reason and "learning_probation" not in reason and "learning_feature_blocked" not in reason)
+    out.setdefault("quality_passed", "production_blocked" not in reason)
+    out["blocked_stage"] = out.get("blocked_stage") or infer_blocked_stage(out)
+    if out.get("blocked_stage") != "passed" and not out.get("blocked_reason"):
+        out["blocked_reason"] = reason
+    return out
 
 
 def build_funnel_row(
@@ -155,11 +189,11 @@ def build_funnel_row(
 
 
 def record_funnel_prediction(row: dict):
-    _upsert(SIGNAL_FUNNEL_CSV, SIGNAL_FUNNEL_COLUMNS, row)
+    _upsert(SIGNAL_FUNNEL_CSV, SIGNAL_FUNNEL_COLUMNS, _normalize_funnel_row(row))
 
 
 def record_funnel_validation(row: dict):
-    enriched = enrich_validation_quality(row)
+    enriched = enrich_validation_quality(_normalize_funnel_row(row))
     _upsert(SIGNAL_FUNNEL_CSV, SIGNAL_FUNNEL_COLUMNS, enriched)
     rebuild_strategy_regime_report()
 
