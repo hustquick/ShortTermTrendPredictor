@@ -8,5 +8,6 @@ class RiskGate:
         return (
             final_direction in {"up", "down"}
             and strategy_is_allowed
+            and learning_notify
             and quality_ok
         )

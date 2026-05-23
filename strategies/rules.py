@@ -8,9 +8,15 @@ from config import (
     ADAPTIVE_RULE_SWITCH_MIN_SAMPLES,
     ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
     ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW,
+    ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE,
+    ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10,
     ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY,
+    ADAPTIVE_RULE_SWITCH_MAX_VOLUME_RATIO_10,
+    ADAPTIVE_RULE_SWITCH_MAX_VOLUME_ZSCORE,
     ADAPTIVE_RULE_SWITCH_MIN_RET_30,
     ADAPTIVE_RULE_SWITCH_MIN_RSI_14,
+    ADAPTIVE_RULE_SWITCH_VOLUME_GATE_ENABLED,
     DATA_DIR,
     ADAPTIVE_STRICT_ALLOW_DOWN,
     ADAPTIVE_STRICT_FILTER_ENABLED,
@@ -423,6 +429,12 @@ class AdaptiveRuleSwitchStrategy:
         p_up_raw = float(prediction.get("up_probability", 0.5))
         ret_30 = feature_value(features, "ret_30")
         rsi_14 = feature_value(features, "rsi_14", 50.0)
+        close_position = feature_value(features, "close_position", 0.5)
+        volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+        quote_volume_ratio_10 = feature_value(features, "quote_volume_ratio_10", 1.0)
+        trade_count_ratio_10 = feature_value(features, "trade_count_ratio_10", 1.0)
+        volume_zscore = feature_value(features, "volume_zscore", 0.0)
+        volume_change = feature_value(features, "volume_change", 0.0)
 
         directional_state_ok = (
             direction == "down"
@@ -430,10 +442,28 @@ class AdaptiveRuleSwitchStrategy:
             and rsi_14 > ADAPTIVE_RULE_SWITCH_MIN_RSI_14
             and ret_30 > ADAPTIVE_RULE_SWITCH_MIN_RET_30
         )
+        volume_shock = (
+            volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_VOLUME_RATIO_10
+            or quote_volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10
+            or trade_count_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10
+            or volume_zscore >= ADAPTIVE_RULE_SWITCH_MAX_VOLUME_ZSCORE
+            or abs(volume_change) >= ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE
+        )
+        state_ok = directional_state_ok and (
+            not ADAPTIVE_RULE_SWITCH_VOLUME_GATE_ENABLED or not volume_shock
+        )
         return (
-            f"state_ok={str(directional_state_ok)};directional_state_ok={str(directional_state_ok)};"
+            f"state_ok={str(state_ok)};directional_state_ok={str(directional_state_ok)};"
+            f"volume_gate_enabled={str(ADAPTIVE_RULE_SWITCH_VOLUME_GATE_ENABLED)};"
+            f"volume_shock={str(volume_shock)};"
             f"raw_up_probability={p_up_raw:.4f};"
-            f"state_rsi_14={rsi_14:.4f};state_ret_30={ret_30:.6f}"
+            f"state_rsi_14={rsi_14:.4f};state_ret_30={ret_30:.6f};"
+            f"state_close_position={close_position:.4f};"
+            f"volume_ratio_10={volume_ratio_10:.4f};"
+            f"quote_volume_ratio_10={quote_volume_ratio_10:.4f};"
+            f"trade_count_ratio_10={trade_count_ratio_10:.4f};"
+            f"volume_zscore={volume_zscore:.4f};"
+            f"volume_change={volume_change:.4f}"
         )
 
     def _rule_stats(self, rule_name: str) -> dict:

@@ -447,6 +447,13 @@ def strict_walk_forward_backtest(
                 )
                 final_direction = decision.direction
                 learning = learning_gate.decide(strategy_name, raw_pred_dir)
+                if (
+                    strategy_name == "adaptive_rule_switch"
+                    and "adaptive_mode=active" in str(decision.reason)
+                ):
+                    learning.notify = True
+                    learning.state = "delegated_to_rule_switch"
+                    learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
                 reason = f"{decision.reason};{learning.reason}"
                 quality_ok, quality_reason = passes_production_quality_gate(
                     strategy_name=strategy_name,
@@ -496,6 +503,11 @@ def strict_walk_forward_backtest(
                     "filtered_is_correct": is_correct if notify_enabled else None,
                     "raw_is_correct": is_correct,
                     "model_trained_at": model_trained_at_time,
+                    "volume_ratio_10": feature_row.get("volume_ratio_10"),
+                    "quote_volume_ratio_10": feature_row.get("quote_volume_ratio_10"),
+                    "trade_count_ratio_10": feature_row.get("trade_count_ratio_10"),
+                    "volume_zscore": feature_row.get("volume_zscore"),
+                    "volume_change": feature_row.get("volume_change"),
                 }
                 results.append(row)
 

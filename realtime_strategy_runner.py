@@ -15,11 +15,6 @@ from config import (
     ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION,
     ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
     ADAPTIVE_NOTIFY_MIN_EDGE,
-    ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
-    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_CONFIDENCE,
-    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RET_30,
-    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RSI_14,
-    ADAPTIVE_RULE_SWITCH_RELAXED_NOTIFY_ENABLED,
     DATA_DIR,
     ALL_PREDICTIONS_CSV,
     HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
@@ -307,7 +302,8 @@ def append_validated_signal(row: dict):
     _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
 
-def _load_official_accuracy_before(strategy_name: str | None = None) -> tuple[float | None, int, int]:
+def _load_effective_signal_accuracy_before(strategy_name: str | None = None) -> tuple[float | None, int, int]:
+    """Accuracy for validated effective signals that were actually notification-eligible."""
     if not OFFICIAL_SIGNALS_CSV.exists():
         return None, 0, 0
     total = 0
@@ -327,8 +323,8 @@ def _load_official_accuracy_before(strategy_name: str | None = None) -> tuple[fl
     return correct / total, correct, total
 
 
-def _official_accuracy_after_current(strategy_name: str | None, current_correct: bool) -> tuple[float, int, int]:
-    previous_accuracy, previous_correct, previous_total = _load_official_accuracy_before(strategy_name)
+def _effective_signal_accuracy_after_current(strategy_name: str | None, current_correct: bool) -> tuple[float, int, int]:
+    previous_accuracy, previous_correct, previous_total = _load_effective_signal_accuracy_before(strategy_name)
     correct = previous_correct + (1 if current_correct else 0)
     total = previous_total + 1
     return correct / total, correct, total
@@ -383,27 +379,18 @@ def passes_production_quality_gate(
         samples = _extract_reason_float(reason, "rule_samples") or 0.0
         win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
         state_ok = _extract_reason_value(reason, "state_ok")
-        state_rsi_14 = _extract_reason_float(reason, "state_rsi_14")
-        state_ret_30 = _extract_reason_float(reason, "state_ret_30")
+        volume_gate_enabled = _extract_reason_value(reason, "volume_gate_enabled")
+        volume_shock = _extract_reason_value(reason, "volume_shock")
         if mode != "active":
             return False, "production_blocked;adaptive_rule_switch_exploring"
         if samples < 5:
             return False, "production_blocked;adaptive_rule_switch_samples_below_5"
-        if win_rate < ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:
-            return False, f"production_blocked;adaptive_rule_switch_win_rate_below_{ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:.2f}"
+        if win_rate < 0.70:
+            return False, "production_blocked;adaptive_rule_switch_win_rate_below_0.70"
         if state_ok != "True":
-            relaxed_state_ok = (
-                ADAPTIVE_RULE_SWITCH_RELAXED_NOTIFY_ENABLED
-                and confidence >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_CONFIDENCE
-                and state_rsi_14 is not None
-                and state_ret_30 is not None
-                and state_rsi_14 >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RSI_14
-                and state_ret_30 >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RET_30
-                and raw_direction == "down"
-            )
-            if not relaxed_state_ok:
-                return False, "production_blocked;adaptive_rule_switch_state_blocked"
-            return True, "production_quality_passed;adaptive_rule_switch_relaxed_state_passed"
+            if volume_gate_enabled == "True" and volume_shock == "True":
+                return False, "production_blocked;adaptive_rule_switch_volume_shock"
+            return False, "production_blocked;adaptive_rule_switch_state_blocked"
         return True, "production_quality_passed"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
@@ -796,7 +783,7 @@ def validate_due_signals(df, now_ms: int):
         notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
         strategy_accuracy = strategy_correct_count = strategy_total_count = None
         if notify_enabled:
-            strategy_accuracy, strategy_correct_count, strategy_total_count = _official_accuracy_after_current(
+            strategy_accuracy, strategy_correct_count, strategy_total_count = _effective_signal_accuracy_after_current(
                 row["strategy"],
                 is_correct,
             )
@@ -914,8 +901,8 @@ def validate_due_signals(df, now_ms: int):
             "[realtime_strategy] validation: "
             f"strategy={row['strategy']}, id={row['prediction_id']}, "
             f"predicted={predicted_direction}, actual={actual_direction}, correct={is_correct}, "
-            f"strategy_official_accuracy={strategy_accuracy if strategy_accuracy is not None else 'n/a'}, "
-            f"strategy_official_samples={strategy_correct_count}/{strategy_total_count}"
+            f"strategy_effective_signal_accuracy={strategy_accuracy if strategy_accuracy is not None else 'n/a'}, "
+            f"strategy_effective_signal_samples={strategy_correct_count}/{strategy_total_count}"
         )
 
     save_pending_signals(remaining)
@@ -947,6 +934,13 @@ def register_prediction_signal(
         raw_direction,
         features,
     )
+    if (
+        strategy_name == "adaptive_rule_switch"
+        and _extract_reason_value(decision.reason, "adaptive_mode") == "active"
+    ):
+        learning.notify = True
+        learning.state = "delegated_to_rule_switch"
+        learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
     reason = f"{decision.reason};{learning.reason}"
     quality_ok, quality_reason = passes_production_quality_gate(
         strategy_name=strategy_name,
@@ -1074,7 +1068,7 @@ def register_prediction_signal(
     )
 
     if notify_enabled:
-        strategy_accuracy, strategy_correct_count, strategy_total_count = _load_official_accuracy_before(strategy_name)
+        strategy_accuracy, strategy_correct_count, strategy_total_count = _load_effective_signal_accuracy_before(strategy_name)
         NOTIFIER.send_prediction(
             strategy_name=strategy_name,
             direction=raw_direction,
