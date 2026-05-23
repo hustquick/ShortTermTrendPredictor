@@ -11,7 +11,10 @@ STRATEGY_DISPLAY_NAMES = {
     "historical_match": "🔍 historical_match 历史相似样本策略",
     "historical_match_long": "🔎 historical_match_long 历史匹配做多策略",
     "historical_match_short": "🔎 historical_match_short 历史匹配做空策略",
+    "adaptive_rule_switch": "🔁 adaptive_rule_switch 滚动规则切换策略",
+    "adaptive_dual": "🧩 adaptive_dual 双模型自适应策略",
     "kronos_confirm": "🧠 kronos_confirm Kronos 确认策略",
+    "kronos_lead": "🧠 kronos_lead Kronos 领先策略",
     "finstar_scenario": "🌟 finstar_scenario 场景推理策略",
 }
 
@@ -29,6 +32,7 @@ def post_wecom_markdown(lines: list[str]) -> bool:
         if resp.status_code != 200:
             print(f"[strategy alert] wecom status={resp.status_code}, body={resp.text}")
             return False
+        print("[strategy alert] wecom sent")
         return True
     except Exception as exc:
         print(f"[strategy alert] send failed: {type(exc).__name__}: {exc}")

@@ -16,6 +16,10 @@ from config import (
     ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
     ADAPTIVE_NOTIFY_MIN_EDGE,
     ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
+    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_CONFIDENCE,
+    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RET_30,
+    ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RSI_14,
+    ADAPTIVE_RULE_SWITCH_RELAXED_NOTIFY_ENABLED,
     DATA_DIR,
     ALL_PREDICTIONS_CSV,
     HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
@@ -379,6 +383,8 @@ def passes_production_quality_gate(
         samples = _extract_reason_float(reason, "rule_samples") or 0.0
         win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
         state_ok = _extract_reason_value(reason, "state_ok")
+        state_rsi_14 = _extract_reason_float(reason, "state_rsi_14")
+        state_ret_30 = _extract_reason_float(reason, "state_ret_30")
         if mode != "active":
             return False, "production_blocked;adaptive_rule_switch_exploring"
         if samples < 5:
@@ -386,7 +392,18 @@ def passes_production_quality_gate(
         if win_rate < ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:
             return False, f"production_blocked;adaptive_rule_switch_win_rate_below_{ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE:.2f}"
         if state_ok != "True":
-            return False, "production_blocked;adaptive_rule_switch_state_blocked"
+            relaxed_state_ok = (
+                ADAPTIVE_RULE_SWITCH_RELAXED_NOTIFY_ENABLED
+                and confidence >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_CONFIDENCE
+                and state_rsi_14 is not None
+                and state_ret_30 is not None
+                and state_rsi_14 >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RSI_14
+                and state_ret_30 >= ADAPTIVE_RULE_SWITCH_RELAXED_MIN_RET_30
+                and raw_direction == "down"
+            )
+            if not relaxed_state_ok:
+                return False, "production_blocked;adaptive_rule_switch_state_blocked"
+            return True, "production_quality_passed;adaptive_rule_switch_relaxed_state_passed"
         return True, "production_quality_passed"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
