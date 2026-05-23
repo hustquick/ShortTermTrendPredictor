@@ -453,7 +453,7 @@ data/strategy_learning_state.json
 - `STRATEGY_LEARNING_ENABLE_WIN_RATE`
 - `STRATEGY_LEARNING_FEATURE_BLOCK_MIN_ERRORS`
 
-当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。正式通知的胜率展示必须按策略独立统计，不能把不同策略混成一个总胜率。
+当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察；正式通知由生产白名单和生产质量门槛决定，自学习状态只作为风险信息和历史胜率参考，不再一票否决通知。正式通知的胜率展示必须按策略独立统计，不能把不同策略混成一个总胜率。
 
 ## 12. 输出文件
 
