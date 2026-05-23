@@ -119,10 +119,10 @@ def infer_blocked_stage(row: dict) -> str:
         return "strategy"
     if not _is_true(row.get("allowlist_passed")):
         return "allowlist"
-    if not _is_true(row.get("learning_passed")):
-        return "learning"
     if not _is_true(row.get("quality_passed")):
         return "quality"
+    if not _is_true(row.get("learning_passed")):
+        return "learning_context"
     return "risk_gate"
 
 

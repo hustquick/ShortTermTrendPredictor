@@ -951,8 +951,6 @@ def register_prediction_signal(
         skip_reasons.append(f"final_direction={final_direction}")
     if not is_official_signal_strategy(strategy_name):
         skip_reasons.append("not_official_strategy")
-    if not learning.notify:
-        skip_reasons.append(f"learning={learning.state}")
     if not quality_ok:
         skip_reasons.append(f"quality={quality_reason}")
 
@@ -1080,7 +1078,7 @@ def register_prediction_signal(
         print(
             "[realtime_strategy] prediction notification skipped: "
             f"strategy={strategy_name}, reason={';'.join(skip_reasons) or 'unknown'}, "
-            f"learning_reason={learning.reason}"
+            f"learning_context={learning.state}, learning_reason={learning.reason}"
         )
 
 
