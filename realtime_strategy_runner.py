@@ -15,6 +15,7 @@ from config import (
     ADAPTIVE_NOTIFY_REQUIRE_CONFIRMATION,
     ADAPTIVE_NOTIFY_MIN_CONFIDENCE,
     ADAPTIVE_NOTIFY_MIN_EDGE,
+    ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK,
     DATA_DIR,
     ALL_PREDICTIONS_CSV,
     HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
@@ -378,11 +379,17 @@ def passes_production_quality_gate(
         mode = _extract_reason_value(reason, "adaptive_mode")
         samples = _extract_reason_float(reason, "rule_samples") or 0.0
         win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
+        recent_loss_streak = _extract_reason_float(reason, "rule_recent_loss_streak") or 0.0
+        context_veto = _extract_reason_value(reason, "context_veto")
         state_ok = _extract_reason_value(reason, "state_ok")
         volume_gate_enabled = _extract_reason_value(reason, "volume_gate_enabled")
         volume_shock = _extract_reason_value(reason, "volume_shock")
         if mode != "active":
             return False, "production_blocked;adaptive_rule_switch_exploring"
+        if context_veto == "True":
+            return False, "production_blocked;adaptive_rule_switch_context_veto"
+        if recent_loss_streak > ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK:
+            return False, "production_blocked;adaptive_rule_switch_recent_loss_streak"
         if samples < 5:
             return False, "production_blocked;adaptive_rule_switch_samples_below_5"
         if win_rate < 0.70:

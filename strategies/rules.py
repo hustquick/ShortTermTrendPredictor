@@ -9,6 +9,10 @@ from config import (
     ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
     ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW,
     ADAPTIVE_RULE_SWITCH_ALLOW_GLOBAL_FALLBACK,
+    ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE,
+    ADAPTIVE_RULE_SWITCH_CONTEXT_ENABLED,
+    ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES,
+    ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK,
     ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE,
     ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10,
     ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10,
@@ -95,6 +99,19 @@ def _reason_value(reason: str, key: str) -> str:
         if part.startswith(prefix):
             return part[len(prefix):]
     return ""
+
+
+def _beijing_session_from_timestamp(timestamp_ms: float) -> str:
+    if pd.isna(timestamp_ms) or timestamp_ms <= 0:
+        return "unknown"
+    hour = int((int(timestamp_ms) // 3_600_000 + 8) % 24)
+    if 8 <= hour < 15:
+        return "asia_day"
+    if 15 <= hour < 21:
+        return "europe_overlap"
+    if 21 <= hour or hour < 1:
+        return "us_open"
+    return "late_us"
 
 
 class BaselineDualStrategy:
@@ -355,15 +372,18 @@ class AdaptiveRuleSwitchStrategy:
             return StrategyDecision("no_trade", 0.0, "adaptive_rule_switch_no_candidate")
 
         regime = classify_market_regime(features)
+        session = _beijing_session_from_timestamp(feature_value(features, "timestamp"))
         scored = []
         for rule in candidates:
-            stats = self._select_rule_stats(rule["name"], regime)
+            stats = self._select_rule_stats(rule["name"], regime, session)
             scored.append({**rule, **stats})
 
         active = [
             item for item in scored
             if item["samples"] >= ADAPTIVE_RULE_SWITCH_MIN_SAMPLES
             and item["win_rate"] >= ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE
+            and item["recent_loss_streak"] <= ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK
+            and not item["context_veto"]
         ]
         if active:
             selected = sorted(active, key=lambda x: (x["win_rate"], x["samples"], x["confidence"]), reverse=True)[0]
@@ -374,9 +394,11 @@ class AdaptiveRuleSwitchStrategy:
 
         reason = (
             f"adaptive_rule_switch;adaptive_mode={mode};adaptive_rule={selected['name']};"
-            f"adaptive_regime={regime};rule_scope={selected['scope']};"
+            f"adaptive_regime={regime};adaptive_session={session};rule_scope={selected['scope']};"
             f"rule_samples={selected['samples']};rule_win_rate={selected['win_rate']:.4f};"
             f"rule_wins={selected['wins']};"
+            f"rule_recent_loss_streak={selected['recent_loss_streak']};"
+            f"context_veto={str(selected['context_veto'])};"
             f"{self._state_reason(features, prediction, selected['direction'])}"
         )
         return StrategyDecision(selected["direction"], selected["confidence"], reason)
@@ -472,10 +494,28 @@ class AdaptiveRuleSwitchStrategy:
             f"volume_change={volume_change:.4f}"
         )
 
-    def _select_rule_stats(self, rule_name: str, regime: str) -> dict:
+    @staticmethod
+    def _empty_stats() -> dict:
+        return {
+            "samples": 0,
+            "wins": 0,
+            "win_rate": 0.0,
+            "recent_loss_streak": 0,
+            "context_veto": False,
+        }
+
+    def _select_rule_stats(self, rule_name: str, regime: str, session: str) -> dict:
         global_stats = self._rule_stats(rule_name)
         if not ADAPTIVE_RULE_SWITCH_REGIME_ENABLED:
             return {**global_stats, "scope": "global"}
+
+        if ADAPTIVE_RULE_SWITCH_CONTEXT_ENABLED:
+            context_stats = self._rule_stats(rule_name, regime, session)
+            if context_stats["samples"] >= ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES:
+                context_veto = context_stats["win_rate"] < ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE
+                if context_veto:
+                    return {**context_stats, "scope": "context_veto", "context_veto": True}
+                return {**context_stats, "scope": "context"}
 
         regime_stats = self._rule_stats(rule_name, regime)
         if regime_stats["samples"] >= ADAPTIVE_RULE_SWITCH_REGIME_MIN_SAMPLES:
@@ -486,27 +526,44 @@ class AdaptiveRuleSwitchStrategy:
 
         return {**regime_stats, "scope": "regime_cold_start"}
 
-    def _rule_stats(self, rule_name: str, regime: str | None = None) -> dict:
+    def _rule_stats(
+        self,
+        rule_name: str,
+        regime: str | None = None,
+        session: str | None = None,
+    ) -> dict:
         if self.records:
             rows = [
                 row for row in self.records
                 if row.get("rule") == rule_name
                 and row.get("state_ok")
                 and (regime is None or row.get("regime") == regime)
+                and (session is None or row.get("session") == session)
             ][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
             samples = len(rows)
             if samples == 0:
-                return {"samples": 0, "wins": 0, "win_rate": 0.0}
+                return self._empty_stats()
             wins = sum(bool(row.get("correct")) for row in rows)
-            return {"samples": samples, "wins": wins, "win_rate": float(wins / samples)}
+            recent_loss_streak = 0
+            for row in reversed(rows):
+                if bool(row.get("correct")):
+                    break
+                recent_loss_streak += 1
+            return {
+                "samples": samples,
+                "wins": wins,
+                "win_rate": float(wins / samples),
+                "recent_loss_streak": recent_loss_streak,
+                "context_veto": False,
+            }
         if not VALIDATED_STRATEGY_SIGNALS.exists() or VALIDATED_STRATEGY_SIGNALS.stat().st_size == 0:
-            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+            return self._empty_stats()
         try:
             df = pd.read_csv(VALIDATED_STRATEGY_SIGNALS)
         except Exception:
-            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+            return self._empty_stats()
         if df.empty or "reason" not in df.columns:
-            return {"samples": 0, "wins": 0, "win_rate": 0.0}
+            return self._empty_stats()
         reason = df["reason"].fillna("").astype(str)
         mask = (
             (df.get("strategy") == self.name)
@@ -515,21 +572,37 @@ class AdaptiveRuleSwitchStrategy:
         )
         if regime is not None:
             mask &= reason.str.contains(f"adaptive_regime={regime}", regex=False)
+        if session is not None:
+            mask &= reason.str.contains(f"adaptive_session={session}", regex=False)
         rows = df[mask].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
         samples = int(len(rows))
         if samples == 0:
-            return {"samples": 0, "wins": 0, "win_rate": 0.0}
-        wins = int(rows["correct"].astype(str).str.lower().eq("true").sum())
-        return {"samples": samples, "wins": wins, "win_rate": float(wins / samples)}
+            return self._empty_stats()
+        correct = rows["correct"].astype(str).str.lower().eq("true").tolist()
+        wins = int(sum(correct))
+        recent_loss_streak = 0
+        for value in reversed(correct):
+            if value:
+                break
+            recent_loss_streak += 1
+        return {
+            "samples": samples,
+            "wins": wins,
+            "win_rate": float(wins / samples),
+            "recent_loss_streak": recent_loss_streak,
+            "context_veto": False,
+        }
 
     def observe_result(self, decision: StrategyDecision, correct: bool):
         rule = _reason_value(decision.reason, "adaptive_rule")
         if not rule:
             return
         regime = _reason_value(decision.reason, "adaptive_regime")
+        session = _reason_value(decision.reason, "adaptive_session")
         self.records.append({
             "rule": rule,
             "regime": regime,
+            "session": session,
             "state_ok": _reason_value(decision.reason, "state_ok") == "True",
             "correct": bool(correct),
         })
