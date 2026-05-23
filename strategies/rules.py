@@ -8,6 +8,7 @@ from config import (
     ADAPTIVE_RULE_SWITCH_MIN_SAMPLES,
     ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
     ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW,
+    ADAPTIVE_RULE_SWITCH_ALLOW_GLOBAL_FALLBACK,
     ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE,
     ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10,
     ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10,
@@ -16,6 +17,8 @@ from config import (
     ADAPTIVE_RULE_SWITCH_MAX_VOLUME_ZSCORE,
     ADAPTIVE_RULE_SWITCH_MIN_RET_30,
     ADAPTIVE_RULE_SWITCH_MIN_RSI_14,
+    ADAPTIVE_RULE_SWITCH_REGIME_ENABLED,
+    ADAPTIVE_RULE_SWITCH_REGIME_MIN_SAMPLES,
     ADAPTIVE_RULE_SWITCH_VOLUME_GATE_ENABLED,
     DATA_DIR,
     ADAPTIVE_STRICT_ALLOW_DOWN,
@@ -32,6 +35,7 @@ from config import (
 from finstar_scenario_layer import evaluate_finstar_scenario
 from high_win_rate_filter import passes_high_win_rate_filter
 from historical_match_filter import evaluate_historical_match
+from market_regime import classify_market_regime
 from strategies.base import StrategyDecision, feature_value
 
 
@@ -350,9 +354,10 @@ class AdaptiveRuleSwitchStrategy:
         if not candidates:
             return StrategyDecision("no_trade", 0.0, "adaptive_rule_switch_no_candidate")
 
+        regime = classify_market_regime(features)
         scored = []
         for rule in candidates:
-            stats = self._rule_stats(rule["name"])
+            stats = self._select_rule_stats(rule["name"], regime)
             scored.append({**rule, **stats})
 
         active = [
@@ -369,6 +374,7 @@ class AdaptiveRuleSwitchStrategy:
 
         reason = (
             f"adaptive_rule_switch;adaptive_mode={mode};adaptive_rule={selected['name']};"
+            f"adaptive_regime={regime};rule_scope={selected['scope']};"
             f"rule_samples={selected['samples']};rule_win_rate={selected['win_rate']:.4f};"
             f"rule_wins={selected['wins']};"
             f"{self._state_reason(features, prediction, selected['direction'])}"
@@ -466,11 +472,27 @@ class AdaptiveRuleSwitchStrategy:
             f"volume_change={volume_change:.4f}"
         )
 
-    def _rule_stats(self, rule_name: str) -> dict:
+    def _select_rule_stats(self, rule_name: str, regime: str) -> dict:
+        global_stats = self._rule_stats(rule_name)
+        if not ADAPTIVE_RULE_SWITCH_REGIME_ENABLED:
+            return {**global_stats, "scope": "global"}
+
+        regime_stats = self._rule_stats(rule_name, regime)
+        if regime_stats["samples"] >= ADAPTIVE_RULE_SWITCH_REGIME_MIN_SAMPLES:
+            return {**regime_stats, "scope": "regime"}
+
+        if ADAPTIVE_RULE_SWITCH_ALLOW_GLOBAL_FALLBACK:
+            return {**global_stats, "scope": "global_fallback"}
+
+        return {**regime_stats, "scope": "regime_cold_start"}
+
+    def _rule_stats(self, rule_name: str, regime: str | None = None) -> dict:
         if self.records:
             rows = [
                 row for row in self.records
-                if row.get("rule") == rule_name and row.get("state_ok")
+                if row.get("rule") == rule_name
+                and row.get("state_ok")
+                and (regime is None or row.get("regime") == regime)
             ][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
             samples = len(rows)
             if samples == 0:
@@ -485,11 +507,15 @@ class AdaptiveRuleSwitchStrategy:
             return {"samples": 0, "wins": 0, "win_rate": 0.0}
         if df.empty or "reason" not in df.columns:
             return {"samples": 0, "wins": 0, "win_rate": 0.0}
-        rows = df[
+        reason = df["reason"].fillna("").astype(str)
+        mask = (
             (df.get("strategy") == self.name)
-            & df["reason"].fillna("").astype(str).str.contains(f"adaptive_rule={rule_name}", regex=False)
-            & df["reason"].fillna("").astype(str).str.contains("state_ok=True", regex=False)
-        ].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
+            & reason.str.contains(f"adaptive_rule={rule_name}", regex=False)
+            & reason.str.contains("state_ok=True", regex=False)
+        )
+        if regime is not None:
+            mask &= reason.str.contains(f"adaptive_regime={regime}", regex=False)
+        rows = df[mask].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
         samples = int(len(rows))
         if samples == 0:
             return {"samples": 0, "wins": 0, "win_rate": 0.0}
@@ -500,8 +526,10 @@ class AdaptiveRuleSwitchStrategy:
         rule = _reason_value(decision.reason, "adaptive_rule")
         if not rule:
             return
+        regime = _reason_value(decision.reason, "adaptive_regime")
         self.records.append({
             "rule": rule,
+            "regime": regime,
             "state_ok": _reason_value(decision.reason, "state_ok") == "True",
             "correct": bool(correct),
         })

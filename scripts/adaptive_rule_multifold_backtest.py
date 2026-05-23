@@ -53,6 +53,7 @@ def main():
     parser.add_argument("--max-steps-per-fold", type=int, default=None)
     parser.add_argument("--min-win-rate", type=float, default=0.75)
     parser.add_argument("--min-signals-per-day", type=float, default=10.0)
+    parser.add_argument("--backtest-log", default=None)
     parser.add_argument("--no-update-cache", action="store_true")
     parser.add_argument("--output-prefix", default="adaptive_rule_switch_multifold")
     args = parser.parse_args()
@@ -87,16 +88,36 @@ def main():
         fold_end_time = ms_to_beijing_time(int(df.iloc[fold_end - 1]["timestamp"]))
         print(f"[adaptive_rule_multifold] fold={fold}/{args.folds} {fold_start_time} -> {fold_end_time}")
 
-        result = strict_walk_forward_backtest(
-            fold_df,
-            train_window_minutes=args.train_window_minutes,
-            step_minutes=args.step_minutes,
-            model_update_minutes=args.model_update_minutes,
-            min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
-            max_steps=args.max_steps_per_fold,
-            progress_every=500,
-            use_walk_forward_match_pool=False,
-        )
+        if args.backtest_log:
+            log_path = Path(args.backtest_log)
+            log_path.parent.mkdir(exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log_file:
+                print(
+                    f"[adaptive_rule_multifold] fold={fold}/{args.folds} log redirected",
+                    file=log_file,
+                )
+                with contextlib.redirect_stdout(log_file):
+                    result = strict_walk_forward_backtest(
+                        fold_df,
+                        train_window_minutes=args.train_window_minutes,
+                        step_minutes=args.step_minutes,
+                        model_update_minutes=args.model_update_minutes,
+                        min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
+                        max_steps=args.max_steps_per_fold,
+                        progress_every=500,
+                        use_walk_forward_match_pool=False,
+                    )
+        else:
+            result = strict_walk_forward_backtest(
+                fold_df,
+                train_window_minutes=args.train_window_minutes,
+                step_minutes=args.step_minutes,
+                model_update_minutes=args.model_update_minutes,
+                min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
+                max_steps=args.max_steps_per_fold,
+                progress_every=500,
+                use_walk_forward_match_pool=False,
+            )
         if result.empty:
             continue
         result["fold"] = fold
