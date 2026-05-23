@@ -778,14 +778,9 @@ def validate_due_signals(df, now_ms: int):
         validation_time = ms_to_beijing_time(validation_timestamp)
         notify_enabled = str(row.get("notify_enabled", "")).lower() == "true"
         strategy_accuracy = strategy_correct_count = strategy_total_count = None
-        official_accuracy = official_correct_count = official_total_count = None
         if notify_enabled:
             strategy_accuracy, strategy_correct_count, strategy_total_count = _official_accuracy_after_current(
                 row["strategy"],
-                is_correct,
-            )
-            official_accuracy, official_correct_count, official_total_count = _official_accuracy_after_current(
-                None,
                 is_correct,
             )
 
@@ -895,9 +890,6 @@ def validate_due_signals(df, now_ms: int):
                 strategy_accuracy=strategy_accuracy,
                 strategy_correct_count=strategy_correct_count,
                 strategy_total_count=strategy_total_count,
-                official_accuracy=official_accuracy,
-                official_correct_count=official_correct_count,
-                official_total_count=official_total_count,
             )
         else:
             print(f"[realtime_strategy] validation notification skipped for observation strategy={row['strategy']}")
@@ -905,8 +897,8 @@ def validate_due_signals(df, now_ms: int):
             "[realtime_strategy] validation: "
             f"strategy={row['strategy']}, id={row['prediction_id']}, "
             f"predicted={predicted_direction}, actual={actual_direction}, correct={is_correct}, "
-            f"official_accuracy={official_accuracy if official_accuracy is not None else 'n/a'}, "
-            f"official_samples={official_correct_count}/{official_total_count}"
+            f"strategy_official_accuracy={strategy_accuracy if strategy_accuracy is not None else 'n/a'}, "
+            f"strategy_official_samples={strategy_correct_count}/{strategy_total_count}"
         )
 
     save_pending_signals(remaining)
@@ -1067,6 +1059,7 @@ def register_prediction_signal(
     )
 
     if notify_enabled:
+        strategy_accuracy, strategy_correct_count, strategy_total_count = _load_official_accuracy_before(strategy_name)
         NOTIFIER.send_prediction(
             strategy_name=strategy_name,
             direction=raw_direction,
@@ -1079,6 +1072,9 @@ def register_prediction_signal(
             down_signal_probability=prediction.get("down_signal_probability"),
             direction_edge=prediction.get("direction_edge"),
             horizon_minutes=PREDICT_HORIZON_MINUTES,
+            strategy_accuracy=strategy_accuracy,
+            strategy_correct_count=strategy_correct_count,
+            strategy_total_count=strategy_total_count,
         )
     else:
         print(

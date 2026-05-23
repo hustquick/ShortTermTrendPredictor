@@ -453,7 +453,7 @@ data/strategy_learning_state.json
 - `STRATEGY_LEARNING_ENABLE_WIN_RATE`
 - `STRATEGY_LEARNING_FEATURE_BLOCK_MIN_ERRORS`
 
-当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。当前无 Volume 状态门控版本的生产白名单只保留 `adaptive_rule_switch`，其它策略继续观察记录但不推送。
+当前通知原则：真正的正式信号以 `notify_enabled=True` 为准，而不是简单看 `final_direction in {up, down}`。策略可以继续给出方向用于观察，但未通过生产白名单、自学习门控和生产质量门槛时不应进入企业微信通知和正式信号胜率统计。正式通知的胜率展示必须按策略独立统计，不能把不同策略混成一个总胜率。
 
 ## 12. 输出文件
 
@@ -529,11 +529,18 @@ PNG 是静态快照，不是实时窗口。
 
 - 只统计 `data/official_signals.csv` 中 `validation_status=validated` 的正式通知信号。
 - 不统计 `validated_strategy_signals.csv` 中的观察候选、强制方向预测或低置信记录。
-- 通知同时展示正式通知总准确率和该策略正式通知准确率。
+- 预测通知展示该策略发送前的正式通知历史胜率。
+- 验证通知展示该策略包含本次验证后的正式通知胜率。
+- 不在通知中展示跨策略合并胜率，避免 Kronos、historical_match、adaptive 等策略互相污染统计口径。
 
 当前生产白名单：
 
 - `adaptive_rule_switch`
+- `adaptive_dual`
+- `historical_match`
+- `historical_match_short`
+- `kronos_confirm`
+- `kronos_lead`
 
 额外生产质量门槛：
 
