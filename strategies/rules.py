@@ -1,11 +1,24 @@
 # strategies/rules.py
 
+import itertools
+import math
+
 import pandas as pd
 
 from config import (
     ADAPTIVE_DUAL_MIN_CONFIDENCE,
     ADAPTIVE_DUAL_MIN_EDGE,
+    ADAPTIVE_RULE_MINER_COOLDOWN_RECORDS,
+    ADAPTIVE_RULE_MINER_ENABLED,
+    ADAPTIVE_RULE_MINER_LOOKBACK_DAY_OPTIONS,
+    ADAPTIVE_RULE_MINER_LOOKBACK_DAYS,
+    ADAPTIVE_RULE_MINER_LOOKBACK_SIGNALS,
+    ADAPTIVE_RULE_MINER_MAX_CLAUSES,
+    ADAPTIVE_RULE_MINER_MIN_SAMPLES,
+    ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER,
+    ADAPTIVE_RULE_MINER_MIN_WIN_RATE,
     ADAPTIVE_RULE_SWITCH_MIN_SAMPLES,
+    ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
     ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
     ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW,
     ADAPTIVE_RULE_SWITCH_ALLOW_GLOBAL_FALLBACK,
@@ -197,6 +210,16 @@ def _adaptive_feature_context(features, prediction: dict) -> str:
         f"{probability_context}|{rsi_bucket}|{ret_bucket}|{position_bucket}|"
         f"{volume_bucket}|{taker_bucket}|{trend_bucket}|{volatility_bucket}"
     )
+
+
+def _wilson_lower_bound(wins: int, samples: int, z: float = 1.96) -> float:
+    if samples <= 0:
+        return 0.0
+    p = wins / samples
+    denominator = 1 + z * z / samples
+    centre = p + z * z / (2 * samples)
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * samples)) / samples)
+    return max(0.0, (centre - margin) / denominator)
 
 
 class BaselineDualStrategy:
@@ -450,6 +473,7 @@ class AdaptiveRuleSwitchStrategy:
 
     def __init__(self):
         self.records: list[dict] = []
+        self.cooldowns: dict[str, int] = {}
 
     def decide(self, features, prediction: dict) -> StrategyDecision:
         candidates = self._candidate_rules(features, prediction)
@@ -461,13 +485,28 @@ class AdaptiveRuleSwitchStrategy:
         adaptive_context = _adaptive_feature_context(features, prediction)
         scored = []
         for rule in candidates:
-            stats = self._select_rule_stats(rule["name"], regime, session, adaptive_context)
+            context_tokens = self._context_tokens(
+                rule_name=rule["name"],
+                direction=rule["direction"],
+                regime=regime,
+                session=session,
+                adaptive_context=adaptive_context,
+            )
+            stats = self._select_rule_stats(
+                rule["name"],
+                regime,
+                session,
+                adaptive_context,
+                context_tokens,
+                feature_value(features, "timestamp"),
+            )
             scored.append({**rule, **stats})
 
         active = [
             item for item in scored
             if item["samples"] >= ADAPTIVE_RULE_SWITCH_MIN_SAMPLES
-            and item["win_rate"] >= ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE
+            and item["win_rate"] >= item.get("min_win_rate", ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE)
+            and item.get("wilson_lower", 0.0) >= item.get("min_wilson_lower", 0.0)
             and item["recent_loss_streak"] <= ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK
             and not item["context_veto"]
         ]
@@ -484,8 +523,12 @@ class AdaptiveRuleSwitchStrategy:
             f"adaptive_context={adaptive_context};rule_scope={selected['scope']};"
             f"rule_samples={selected['samples']};rule_win_rate={selected['win_rate']:.4f};"
             f"rule_wins={selected['wins']};"
+            f"rule_wilson_lower={selected.get('wilson_lower', 0.0):.4f};"
             f"rule_recent_loss_streak={selected['recent_loss_streak']};"
             f"context_veto={str(selected['context_veto'])};"
+            f"miner_condition={selected.get('condition', '')};"
+            f"miner_lookback_days={selected.get('lookback_days', '')};"
+            f"adaptive_timestamp_ms={int(feature_value(features, 'timestamp', 0.0))};"
             f"{self._state_reason(features, prediction, selected['direction'])}"
         )
         return StrategyDecision(selected["direction"], selected["confidence"], reason)
@@ -587,9 +630,123 @@ class AdaptiveRuleSwitchStrategy:
             "samples": 0,
             "wins": 0,
             "win_rate": 0.0,
+            "min_win_rate": ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
+            "wilson_lower": 0.0,
+            "min_wilson_lower": ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
             "recent_loss_streak": 0,
             "context_veto": False,
+            "condition": "",
         }
+
+    @staticmethod
+    def _context_tokens(
+        rule_name: str,
+        direction: str,
+        regime: str,
+        session: str,
+        adaptive_context: str,
+    ) -> tuple[str, ...]:
+        tokens = [
+            f"direction={direction}",
+            f"regime={regime}",
+            f"session={session}",
+        ]
+        tokens.extend(f"ctx={token}" for token in adaptive_context.split("|") if token)
+        return tuple(sorted(set(tokens)))
+
+    def _recent_records(
+        self,
+        timestamp_ms: float | None = None,
+        lookback_days: int | None = None,
+    ) -> list[dict]:
+        rows = self.records
+        if timestamp_ms and timestamp_ms > 0:
+            days = lookback_days or ADAPTIVE_RULE_MINER_LOOKBACK_DAYS
+            cutoff = int(timestamp_ms) - int(days) * 86_400_000
+            rows = [row for row in rows if int(row.get("timestamp_ms") or 0) >= cutoff]
+        if ADAPTIVE_RULE_MINER_LOOKBACK_SIGNALS > 0:
+            rows = rows[-ADAPTIVE_RULE_MINER_LOOKBACK_SIGNALS:]
+        return rows
+
+    @staticmethod
+    def _condition_loss_streak(rows: list[dict]) -> int:
+        loss_streak = 0
+        for row in reversed(rows):
+            if bool(row.get("correct")):
+                break
+            loss_streak += 1
+        return loss_streak
+
+    def _condition_in_cooldown(self, condition: str) -> bool:
+        return self.cooldowns.get(condition, -1) > len(self.records)
+
+    def _mine_rule_stats(
+        self,
+        rule_name: str,
+        context_tokens: tuple[str, ...],
+        timestamp_ms: float | None = None,
+    ) -> dict | None:
+        if not ADAPTIVE_RULE_MINER_ENABLED or not self.records:
+            return None
+
+        best = None
+        max_clauses = max(1, ADAPTIVE_RULE_MINER_MAX_CLAUSES)
+        lookback_days_options = tuple(ADAPTIVE_RULE_MINER_LOOKBACK_DAY_OPTIONS) or (
+            ADAPTIVE_RULE_MINER_LOOKBACK_DAYS,
+        )
+        for lookback_days in lookback_days_options:
+            window = [
+                row for row in self._recent_records(timestamp_ms, lookback_days=lookback_days)
+                if row.get("rule") == rule_name and row.get("state_ok")
+            ]
+            if len(window) < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
+                continue
+            for clause_count in range(1, min(max_clauses, len(context_tokens)) + 1):
+                for combo in itertools.combinations(context_tokens, clause_count):
+                    condition = ",".join(combo)
+                    if self._condition_in_cooldown(condition):
+                        continue
+                    combo_set = set(combo)
+                    rows = [
+                        row for row in window
+                        if combo_set.issubset(set(row.get("tokens", ())))
+                    ]
+                    samples = len(rows)
+                    if samples < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
+                        continue
+                    wins = sum(bool(row.get("correct")) for row in rows)
+                    win_rate = wins / samples
+                    wilson_lower = _wilson_lower_bound(wins, samples)
+                    recent_loss_streak = self._condition_loss_streak(rows)
+                    if win_rate < ADAPTIVE_RULE_MINER_MIN_WIN_RATE:
+                        continue
+                    if recent_loss_streak > ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK:
+                        continue
+                    candidate = {
+                        "samples": samples,
+                        "wins": wins,
+                        "win_rate": float(win_rate),
+                        "min_win_rate": ADAPTIVE_RULE_MINER_MIN_WIN_RATE,
+                        "wilson_lower": float(wilson_lower),
+                        "min_wilson_lower": ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER,
+                        "recent_loss_streak": recent_loss_streak,
+                        "context_veto": False,
+                        "condition": condition,
+                        "scope": "online_miner",
+                        "lookback_days": int(lookback_days),
+                    }
+                    sort_key = (
+                        candidate["wilson_lower"],
+                        candidate["win_rate"],
+                        candidate["samples"],
+                        -clause_count,
+                    )
+                    if best is None or sort_key > best[0]:
+                        best = (sort_key, candidate)
+
+        if best is None:
+            return None
+        return best[1]
 
     def _select_rule_stats(
         self,
@@ -597,7 +754,13 @@ class AdaptiveRuleSwitchStrategy:
         regime: str,
         session: str,
         adaptive_context: str,
+        context_tokens: tuple[str, ...],
+        timestamp_ms: float | None,
     ) -> dict:
+        mined_stats = self._mine_rule_stats(rule_name, context_tokens, timestamp_ms)
+        if mined_stats is not None:
+            return mined_stats
+
         global_stats = self._rule_stats(rule_name)
         if not ADAPTIVE_RULE_SWITCH_REGIME_ENABLED:
             return {**global_stats, "scope": "global"}
@@ -668,8 +831,12 @@ class AdaptiveRuleSwitchStrategy:
                 "samples": samples,
                 "wins": wins,
                 "win_rate": float(wins / samples),
+                "min_win_rate": ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
+                "wilson_lower": _wilson_lower_bound(wins, samples),
+                "min_wilson_lower": ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
                 "recent_loss_streak": recent_loss_streak,
                 "context_veto": False,
+                "condition": "",
             }
         if not VALIDATED_STRATEGY_SIGNALS.exists() or VALIDATED_STRATEGY_SIGNALS.stat().st_size == 0:
             return self._empty_stats()
@@ -706,8 +873,12 @@ class AdaptiveRuleSwitchStrategy:
             "samples": samples,
             "wins": wins,
             "win_rate": float(wins / samples),
+            "min_win_rate": ADAPTIVE_RULE_SWITCH_MIN_WIN_RATE,
+            "wilson_lower": _wilson_lower_bound(wins, samples),
+            "min_wilson_lower": ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
             "recent_loss_streak": recent_loss_streak,
             "context_veto": False,
+            "condition": "",
         }
 
     def observe_result(self, decision: StrategyDecision, correct: bool):
@@ -717,14 +888,33 @@ class AdaptiveRuleSwitchStrategy:
         regime = _reason_value(decision.reason, "adaptive_regime")
         session = _reason_value(decision.reason, "adaptive_session")
         adaptive_context = _reason_value(decision.reason, "adaptive_context")
+        direction = decision.direction
+        tokens = self._context_tokens(rule, direction, regime, session, adaptive_context)
+        condition = _reason_value(decision.reason, "miner_condition")
+        scope = _reason_value(decision.reason, "rule_scope")
+        try:
+            timestamp_ms = int(_reason_value(decision.reason, "adaptive_timestamp_ms") or 0)
+        except ValueError:
+            timestamp_ms = 0
         self.records.append({
             "rule": rule,
             "regime": regime,
             "session": session,
             "context": adaptive_context,
+            "tokens": tokens,
+            "condition": condition,
+            "scope": scope,
+            "timestamp_ms": timestamp_ms,
             "state_ok": _reason_value(decision.reason, "state_ok") == "True",
             "correct": bool(correct),
         })
+        if scope == "online_miner" and condition and not correct:
+            rows = [
+                row for row in self.records
+                if row.get("condition") == condition
+            ]
+            if self._condition_loss_streak(rows) >= ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK:
+                self.cooldowns[condition] = len(self.records) + ADAPTIVE_RULE_MINER_COOLDOWN_RECORDS
 
 
 class HistoricalMatchStrategy:
