@@ -81,14 +81,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # 收益率特征
     # =========================
 
-    for n in [1, 2, 3, 5, 10, 15, 20, 30]:
+    for n in [1, 2, 3, 5, 10, 15, 20, 30, 60, 120]:
         df[f"ret_{n}"] = close.pct_change(n)
 
     # =========================
     # 均线与 EMA 特征
     # =========================
 
-    for n in [5, 10, 20, 30, 60]:
+    for n in [5, 10, 20, 30, 60, 120, 240]:
         ma = close.rolling(n).mean()
         ema = _ema(close, n)
 
@@ -99,6 +99,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_5_20_diff"] = _ema(close, 5) / (_ema(close, 20) + 1e-12) - 1
     df["ema_10_30_diff"] = _ema(close, 10) / (_ema(close, 30) + 1e-12) - 1
     df["ema_20_60_diff"] = _ema(close, 20) / (_ema(close, 60) + 1e-12) - 1
+    df["ema_60_240_diff"] = _ema(close, 60) / (_ema(close, 240) + 1e-12) - 1
 
     # =========================
     # MACD
@@ -148,6 +149,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["volatility_5"] = close.pct_change().rolling(5).std()
     df["volatility_10"] = close.pct_change().rolling(10).std()
     df["volatility_30"] = close.pct_change().rolling(30).std()
+    df["volatility_60"] = close.pct_change().rolling(60).std()
+    df["volatility_120"] = close.pct_change().rolling(120).std()
 
     df["atr_14"] = _atr(df, 14) / (close + 1e-12)
 
@@ -215,10 +218,27 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["trend_5"] = np.sign(close - close.shift(5))
     df["trend_10"] = np.sign(close - close.shift(10))
     df["trend_15"] = np.sign(close - close.shift(15))
+    df["trend_30"] = np.sign(close - close.shift(30))
+    df["trend_60"] = np.sign(close - close.shift(60))
 
     df["trend_agreement"] = (
         df["trend_5"] + df["trend_10"] + df["trend_15"]
     ) / 3.0
+    df["trend_agreement_long"] = (
+        df["trend_5"]
+        + df["trend_10"]
+        + df["trend_15"]
+        + df["trend_30"]
+        + df["trend_60"]
+    ) / 5.0
+
+    # 周期性时间特征只来自当前 K 线时间戳，不包含未来信息。
+    minute_of_day = ((df["timestamp"] // 60_000) % 1_440).astype(float)
+    day_of_week = ((df["timestamp"] // 86_400_000 + 3) % 7).astype(float)
+    df["minute_sin"] = np.sin(2 * np.pi * minute_of_day / 1_440)
+    df["minute_cos"] = np.cos(2 * np.pi * minute_of_day / 1_440)
+    df["dow_sin"] = np.sin(2 * np.pi * day_of_week / 7)
+    df["dow_cos"] = np.cos(2 * np.pi * day_of_week / 7)
 
     return df
 
