@@ -41,6 +41,7 @@ def _prepare_frame(path: Path) -> pd.DataFrame:
     reason = df["reason"].fillna("").astype(str)
     df["adaptive_rule"] = [_reason_value(item, "adaptive_rule") for item in reason]
     df["adaptive_mode"] = [_reason_value(item, "adaptive_mode") for item in reason]
+    df["adaptive_context"] = [_reason_value(item, "adaptive_context") for item in reason]
     df["state_ok"] = [_reason_value(item, "state_ok") for item in reason]
     for key in [
         "raw_up_probability",
@@ -66,6 +67,18 @@ def _build_conditions(df: pd.DataFrame) -> list[tuple[str, np.ndarray]]:
         _add_condition(conditions, f"rule={rule}", df["adaptive_rule"].eq(rule))
     for session in sorted(df["session"].dropna().unique()):
         _add_condition(conditions, f"session={session}", df["session"].eq(session))
+    context_tokens = sorted({
+        token
+        for value in df["adaptive_context"].dropna().astype(str)
+        for token in value.split("|")
+        if token
+    })
+    for token in context_tokens:
+        _add_condition(
+            conditions,
+            f"context={token}",
+            df["adaptive_context"].fillna("").astype(str).str.split("|").apply(lambda parts: token in parts),
+        )
     for threshold in [0.10, 0.15, 0.20, 0.25, 0.285, 0.35, 0.45, 0.50]:
         _add_condition(conditions, f"pup<={threshold}", df["raw_up_probability"] <= threshold)
         _add_condition(conditions, f"pup>{threshold}", df["raw_up_probability"] > threshold)

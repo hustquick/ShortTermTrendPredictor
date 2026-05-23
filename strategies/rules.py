@@ -13,6 +13,8 @@ from config import (
     ADAPTIVE_RULE_SWITCH_CONTEXT_ENABLED,
     ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES,
     ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK,
+    ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_ENABLED,
+    ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_MIN_SAMPLES,
     ADAPTIVE_RULE_SWITCH_MAX_ABS_VOLUME_CHANGE,
     ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10,
     ADAPTIVE_RULE_SWITCH_MAX_TRADE_COUNT_RATIO_10,
@@ -112,6 +114,89 @@ def _beijing_session_from_timestamp(timestamp_ms: float) -> str:
     if 21 <= hour or hour < 1:
         return "us_open"
     return "late_us"
+
+
+def _bucket(value: float, thresholds: list[tuple[float, str]], default: str) -> str:
+    if pd.isna(value):
+        return "unknown"
+    for threshold, label in thresholds:
+        if value <= threshold:
+            return label
+    return default
+
+
+def _adaptive_probability_context(prediction: dict) -> str:
+    p_up_raw = float(prediction.get("up_probability", 0.5))
+    edge = float(prediction.get("direction_edge", 0.0))
+    p_up_signal = float(prediction.get("up_signal_probability", 0.0))
+    p_down_signal = float(prediction.get("down_signal_probability", 0.0))
+    up_bucket = _bucket(
+        p_up_raw,
+        [(0.10, "pup_xlow"), (0.20, "pup_low"), (0.35, "pup_midlow"), (0.50, "pup_mixed")],
+        "pup_high",
+    )
+    edge_bucket = _bucket(
+        abs(edge),
+        [(0.15, "edge_small"), (0.35, "edge_mid"), (0.60, "edge_large")],
+        "edge_extreme",
+    )
+    dominance = "up_dom" if p_up_signal > p_down_signal else "down_dom"
+    return f"{up_bucket}|{edge_bucket}|{dominance}"
+
+
+def _adaptive_feature_context(features, prediction: dict) -> str:
+    rsi_14 = feature_value(features, "rsi_14", 50.0)
+    ret_30 = feature_value(features, "ret_30")
+    close_position = feature_value(features, "close_position", 0.5)
+    volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+    taker_buy_ratio = feature_value(features, "taker_buy_ratio", 0.5)
+    trend = feature_value(features, "trend_agreement")
+    trend_long = feature_value(features, "trend_agreement_long", trend)
+    atr_14 = feature_value(features, "atr_14", 0.0)
+    volatility_30 = feature_value(features, "volatility_30", 0.0)
+    volatility_ref = max(abs(atr_14), abs(volatility_30))
+
+    rsi_bucket = _bucket(
+        rsi_14,
+        [(40, "rsi_cold"), (50, "rsi_soft"), (60, "rsi_mid"), (70, "rsi_warm")],
+        "rsi_hot",
+    )
+    ret_bucket = _bucket(
+        ret_30,
+        [(-0.002, "ret30_drop"), (-0.0005, "ret30_down"), (0.0005, "ret30_flat"), (0.002, "ret30_up")],
+        "ret30_surge",
+    )
+    position_bucket = _bucket(
+        close_position,
+        [(0.20, "pos_low"), (0.50, "pos_midlow"), (0.80, "pos_midhigh"), (0.95, "pos_high")],
+        "pos_extreme",
+    )
+    volume_bucket = _bucket(
+        volume_ratio_10,
+        [(0.80, "vol_quiet"), (1.20, "vol_normal"), (1.80, "vol_active")],
+        "vol_shock",
+    )
+    taker_bucket = _bucket(
+        taker_buy_ratio,
+        [(0.45, "taker_sell"), (0.55, "taker_balanced")],
+        "taker_buy",
+    )
+    trend_sum = trend + 0.5 * trend_long
+    trend_bucket = _bucket(
+        trend_sum,
+        [(-0.75, "trend_down"), (-0.20, "trend_soft_down"), (0.20, "trend_mixed"), (0.75, "trend_soft_up")],
+        "trend_up",
+    )
+    volatility_bucket = _bucket(
+        volatility_ref,
+        [(0.0005, "volatility_low"), (0.0015, "volatility_mid")],
+        "volatility_high",
+    )
+    probability_context = _adaptive_probability_context(prediction)
+    return (
+        f"{probability_context}|{rsi_bucket}|{ret_bucket}|{position_bucket}|"
+        f"{volume_bucket}|{taker_bucket}|{trend_bucket}|{volatility_bucket}"
+    )
 
 
 class BaselineDualStrategy:
@@ -373,9 +458,10 @@ class AdaptiveRuleSwitchStrategy:
 
         regime = classify_market_regime(features)
         session = _beijing_session_from_timestamp(feature_value(features, "timestamp"))
+        adaptive_context = _adaptive_feature_context(features, prediction)
         scored = []
         for rule in candidates:
-            stats = self._select_rule_stats(rule["name"], regime, session)
+            stats = self._select_rule_stats(rule["name"], regime, session, adaptive_context)
             scored.append({**rule, **stats})
 
         active = [
@@ -394,7 +480,8 @@ class AdaptiveRuleSwitchStrategy:
 
         reason = (
             f"adaptive_rule_switch;adaptive_mode={mode};adaptive_rule={selected['name']};"
-            f"adaptive_regime={regime};adaptive_session={session};rule_scope={selected['scope']};"
+            f"adaptive_regime={regime};adaptive_session={session};"
+            f"adaptive_context={adaptive_context};rule_scope={selected['scope']};"
             f"rule_samples={selected['samples']};rule_win_rate={selected['win_rate']:.4f};"
             f"rule_wins={selected['wins']};"
             f"rule_recent_loss_streak={selected['recent_loss_streak']};"
@@ -504,18 +591,44 @@ class AdaptiveRuleSwitchStrategy:
             "context_veto": False,
         }
 
-    def _select_rule_stats(self, rule_name: str, regime: str, session: str) -> dict:
+    def _select_rule_stats(
+        self,
+        rule_name: str,
+        regime: str,
+        session: str,
+        adaptive_context: str,
+    ) -> dict:
         global_stats = self._rule_stats(rule_name)
         if not ADAPTIVE_RULE_SWITCH_REGIME_ENABLED:
             return {**global_stats, "scope": "global"}
 
         if ADAPTIVE_RULE_SWITCH_CONTEXT_ENABLED:
-            context_stats = self._rule_stats(rule_name, regime, session)
-            if context_stats["samples"] >= ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES:
-                context_veto = context_stats["win_rate"] < ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE
+            if ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_ENABLED:
+                micro_context_stats = self._rule_stats(
+                    rule_name,
+                    regime=regime,
+                    session=session,
+                    adaptive_context=adaptive_context,
+                )
+                if micro_context_stats["samples"] >= ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_MIN_SAMPLES:
+                    context_veto = (
+                        micro_context_stats["win_rate"]
+                        < ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE
+                    )
+                    if context_veto:
+                        return {
+                            **micro_context_stats,
+                            "scope": "micro_context_veto",
+                            "context_veto": True,
+                        }
+                    return {**micro_context_stats, "scope": "micro_context"}
+
+            session_stats = self._rule_stats(rule_name, regime=regime, session=session)
+            if session_stats["samples"] >= ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES:
+                context_veto = session_stats["win_rate"] < ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE
                 if context_veto:
-                    return {**context_stats, "scope": "context_veto", "context_veto": True}
-                return {**context_stats, "scope": "context"}
+                    return {**session_stats, "scope": "session_context_veto", "context_veto": True}
+                return {**session_stats, "scope": "session_context"}
 
         regime_stats = self._rule_stats(rule_name, regime)
         if regime_stats["samples"] >= ADAPTIVE_RULE_SWITCH_REGIME_MIN_SAMPLES:
@@ -531,6 +644,7 @@ class AdaptiveRuleSwitchStrategy:
         rule_name: str,
         regime: str | None = None,
         session: str | None = None,
+        adaptive_context: str | None = None,
     ) -> dict:
         if self.records:
             rows = [
@@ -539,6 +653,7 @@ class AdaptiveRuleSwitchStrategy:
                 and row.get("state_ok")
                 and (regime is None or row.get("regime") == regime)
                 and (session is None or row.get("session") == session)
+                and (adaptive_context is None or row.get("context") == adaptive_context)
             ][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
             samples = len(rows)
             if samples == 0:
@@ -574,6 +689,8 @@ class AdaptiveRuleSwitchStrategy:
             mask &= reason.str.contains(f"adaptive_regime={regime}", regex=False)
         if session is not None:
             mask &= reason.str.contains(f"adaptive_session={session}", regex=False)
+        if adaptive_context is not None:
+            mask &= reason.str.contains(f"adaptive_context={adaptive_context}", regex=False)
         rows = df[mask].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
         samples = int(len(rows))
         if samples == 0:
@@ -599,10 +716,12 @@ class AdaptiveRuleSwitchStrategy:
             return
         regime = _reason_value(decision.reason, "adaptive_regime")
         session = _reason_value(decision.reason, "adaptive_session")
+        adaptive_context = _reason_value(decision.reason, "adaptive_context")
         self.records.append({
             "rule": rule,
             "regime": regime,
             "session": session,
+            "context": adaptive_context,
             "state_ok": _reason_value(decision.reason, "state_ok") == "True",
             "correct": bool(correct),
         })
