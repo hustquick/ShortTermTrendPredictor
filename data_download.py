@@ -450,10 +450,13 @@ def get_recent_klines_with_cache(
 
     这样回测不会每次都重新从币安下载。
     """
-    now_ms = utc_ms_now()
-    required_start_ms = now_ms - int(minutes) * INTERVAL_MS
-
     history_df = load_history_csv(path)
+    now_ms = utc_ms_now()
+    if not update_if_needed and not history_df.empty:
+        cache_end_ms = int(history_df["timestamp"].max()) + INTERVAL_MS
+        if cache_end_ms > now_ms:
+            now_ms = cache_end_ms
+    required_start_ms = now_ms - int(minutes) * INTERVAL_MS
 
     need_download = False
     download_start_ms = required_start_ms
@@ -514,6 +517,8 @@ def get_recent_klines_with_cache(
 
     # 剔除尚未收盘 K 线
     current_ms = utc_ms_now()
+    if not update_if_needed:
+        current_ms = max(current_ms, now_ms)
     history_df = history_df[history_df["close_time"] < current_ms].copy()
     history_df = clean_kline_dataframe(history_df)
 
