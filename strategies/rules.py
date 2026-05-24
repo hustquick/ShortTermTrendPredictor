@@ -611,14 +611,17 @@ class AdaptiveRuleSwitchStrategy:
         p_up_raw = float(prediction.get("up_probability", 0.5))
         p_up_signal = float(prediction.get("up_signal_probability", 0.0))
         p_down_signal = float(prediction.get("down_signal_probability", 0.0))
+        ret_5 = feature_value(features, "ret_5")
         ret_10 = feature_value(features, "ret_10")
         ret_30 = feature_value(features, "ret_30")
         macd_hist = feature_value(features, "macd_hist")
+        macd_hist_diff = feature_value(features, "macd_hist_diff")
         boll_position = feature_value(features, "boll_position", 0.5)
         close_position = feature_value(features, "close_position", 0.5)
         trend = feature_value(features, "trend_agreement")
         rsi_14 = feature_value(features, "rsi_14", 50.0)
         volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+        taker_buy_ratio_diff = feature_value(features, "taker_buy_ratio_diff_5_10", 0.0)
         direction_edge = float(prediction.get("direction_edge", 0.0))
 
         rules = []
@@ -637,6 +640,24 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw <= 0.45 and ret_30 <= 0 and trend < 0,
             "short_pup_le_045_ret30neg_trenddown",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_down_signal >= 0.70 and direction_edge <= -0.20,
+            "short_signal_edge_down",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            macd_hist < 0 and rsi_14 >= 65 and trend >= 0,
+            "short_feature_overbought_macd_negative",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            rsi_14 >= 65 and ret_10 > 0 and macd_hist < 0,
+            "short_feature_overbought_ret10_macd_negative",
             "down",
             max(p_down_signal, 1.0 - p_up_raw),
         )
@@ -704,6 +725,36 @@ class AdaptiveRuleSwitchStrategy:
             max(p_up_signal, p_up_raw),
         )
         add(
+            p_up_signal >= 0.70 and direction_edge >= 0.20,
+            "long_signal_edge_up",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            rsi_14 <= 35 and volume_ratio_10 >= 1.20 and close_position <= 0.80,
+            "long_feature_oversold_volume_rebound",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            rsi_14 <= 35 and ret_5 > 0 and trend <= 0.333,
+            "long_feature_oversold_ret5_reversal",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            rsi_14 <= 35 and taker_buy_ratio_diff < 0 and volume_ratio_10 >= 1.20,
+            "long_feature_oversold_taker_sell_exhaustion",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.80 and macd_hist_diff > 0 and boll_position <= 0.80,
+            "long_high_pup_macd_turn_not_high",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
             p_up_raw >= 0.90 and abs(direction_edge) >= 0.60 and rsi_14 < 45 and volume_ratio_10 <= 1.5,
             "long_high_pup_extreme_edge_rsi_cool_vol_ok",
             "up",
@@ -728,12 +779,20 @@ class AdaptiveRuleSwitchStrategy:
         volume_zscore = feature_value(features, "volume_zscore", 0.0)
         volume_change = feature_value(features, "volume_change", 0.0)
 
-        directional_state_ok = (
+        short_state_ok = (
             direction == "down"
             and p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
             and rsi_14 > ADAPTIVE_RULE_SWITCH_MIN_RSI_14
             and ret_30 > ADAPTIVE_RULE_SWITCH_MIN_RET_30
         )
+        long_state_ok = (
+            direction == "up"
+            and (p_up_raw >= 0.55 or rsi_14 <= 35)
+            and rsi_14 < 58
+            and ret_30 < 0.002
+            and close_position < 0.90
+        )
+        directional_state_ok = short_state_ok or long_state_ok
         volume_shock = (
             volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_VOLUME_RATIO_10
             or quote_volume_ratio_10 >= ADAPTIVE_RULE_SWITCH_MAX_QUOTE_VOLUME_RATIO_10
