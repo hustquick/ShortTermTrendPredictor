@@ -144,10 +144,12 @@ def main():
                 }
             )
 
-    report = pd.DataFrame(rows).sort_values(
-        ["win_rate", "signals"],
-        ascending=[False, False],
-    )
+    report = pd.DataFrame(rows)
+    if not report.empty:
+        report = report.sort_values(
+            ["win_rate", "signals"],
+            ascending=[False, False],
+        )
     if report.empty:
         print("[strict_output_rule_condition_search] no condition met density")
     else:

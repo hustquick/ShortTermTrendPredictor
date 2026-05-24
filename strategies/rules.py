@@ -566,6 +566,10 @@ class AdaptiveRuleSwitchStrategy:
                 "state_ok": _reason_value(state_reason, "state_ok") == "True",
             })
         self._pending_observations = pending
+        shadow_candidates = ",".join(
+            f"{item['rule']}:{item['direction']}:{int(bool(item['state_ok']))}"
+            for item in pending
+        )
 
         active = [
             item for item in scored
@@ -597,6 +601,7 @@ class AdaptiveRuleSwitchStrategy:
             f"context_veto={str(selected['context_veto'])};"
             f"miner_condition={selected.get('condition', '')};"
             f"miner_lookback_days={selected.get('lookback_days', '')};"
+            f"shadow_candidates={shadow_candidates};"
             f"adaptive_timestamp_ms={timestamp_ms};"
             f"{selected['state_reason']}"
         )
@@ -650,6 +655,15 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw <= 0.20 and abs(direction_edge) >= 0.35 and rsi_14 >= 60,
             "short_low_pup_hot_rsi_edge",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.10
+            and abs(direction_edge) >= 0.35
+            and rsi_14 >= 60
+            and 0.35 < boll_position <= 0.65,
+            "short_xlow_pup_hot_rsi_boll_normal",
             "down",
             max(p_down_signal, 1.0 - p_up_raw),
         )
@@ -800,6 +814,41 @@ class AdaptiveRuleSwitchStrategy:
     def _condition_in_cooldown(self, condition: str) -> bool:
         return self.cooldowns.get(condition, -1) > len(self.records)
 
+    @staticmethod
+    def _miner_search_tokens(
+        context_tokens: tuple[str, ...],
+        window: list[dict],
+        min_samples: int,
+    ) -> tuple[str, ...]:
+        token_counts: dict[str, int] = {}
+        allowed_prefixes = (
+            "regime=",
+            "session=",
+            "ctx=pup_",
+            "ctx=edge_",
+            "ctx=rsi_",
+            "ctx=ret",
+            "ctx=macd_",
+            "ctx=ema_",
+            "ctx=boll_",
+            "ctx=pos_",
+            "ctx=vol_",
+            "ctx=quote_vol_",
+            "ctx=trades_",
+            "ctx=taker_",
+            "ctx=trend_",
+        )
+        context_set = set(context_tokens)
+        for row in window:
+            for token in row.get("tokens", ()):
+                if token in context_set:
+                    token_counts[token] = token_counts.get(token, 0) + 1
+        return tuple(
+            token for token in context_tokens
+            if token_counts.get(token, 0) >= min_samples
+            and token.startswith(allowed_prefixes)
+        )
+
     def _mine_rule_stats(
         self,
         rule_name: str,
@@ -821,15 +870,24 @@ class AdaptiveRuleSwitchStrategy:
             ]
             if len(window) < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
                 continue
-            for clause_count in range(1, min(max_clauses, len(context_tokens)) + 1):
-                for combo in itertools.combinations(context_tokens, clause_count):
+            search_tokens = self._miner_search_tokens(
+                context_tokens,
+                window,
+                ADAPTIVE_RULE_MINER_MIN_SAMPLES,
+            )
+            window_sets = [
+                (row, set(row.get("tokens", ())))
+                for row in window
+            ]
+            for clause_count in range(1, min(max_clauses, len(search_tokens)) + 1):
+                for combo in itertools.combinations(search_tokens, clause_count):
                     condition = ",".join(combo)
                     if self._condition_in_cooldown(condition):
                         continue
                     combo_set = set(combo)
                     rows = [
-                        row for row in window
-                        if combo_set.issubset(set(row.get("tokens", ())))
+                        row for row, token_set in window_sets
+                        if combo_set.issubset(token_set)
                     ]
                     samples = len(rows)
                     if samples < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
