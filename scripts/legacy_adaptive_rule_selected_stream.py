@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import json
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -209,11 +210,14 @@ def build_stream(
     train_window_minutes: int,
     max_steps: int | None,
     output: Path,
+    progress_every_steps: int,
 ) -> pd.DataFrame:
+    print("[legacy_stream] building features...")
     df = df.sort_values("timestamp").reset_index(drop=True)
     close_by_timestamp = df.set_index("timestamp")["close"]
     feature_pipeline = FeaturePipeline()
     feature_df = feature_pipeline.build(df)
+    print(f"[legacy_stream] features ready: rows={len(feature_df)}")
 
     test_minutes = days * 24 * 60
     horizon = PREDICT_HORIZON_MINUTES
@@ -222,6 +226,11 @@ def build_stream(
     candidate_indices = list(range(test_start, test_end, step_minutes))
     if max_steps is not None:
         candidate_indices = candidate_indices[-max_steps:]
+    print(
+        "[legacy_stream] generation plan: "
+        f"days={days}, step_minutes={step_minutes}, model_update_minutes={model_update_minutes}, "
+        f"train_window_minutes={train_window_minutes}, candidate_steps={len(candidate_indices)}"
+    )
 
     model = None
     next_model_update_idx = None
@@ -306,13 +315,28 @@ def build_stream(
         })
         for candidate in candidates:
             records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
-        if step_no % 1000 == 0:
+        if step_no % progress_every_steps == 0:
             elapsed = time.time() - started
             print(f"[legacy_stream] {step_no}/{total} rows={len(rows)} elapsed={elapsed:.1f}s")
 
     out = pd.DataFrame(rows)
     output.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output, index=False)
+    metadata = {
+        "source": "legacy_adaptive_rule_selected_stream",
+        "days": days,
+        "step_minutes": step_minutes,
+        "model_update_minutes": model_update_minutes,
+        "train_window_minutes": train_window_minutes,
+        "max_steps": max_steps,
+        "candidate_steps": len(candidate_indices),
+        "rows": len(out),
+        "output": str(output),
+    }
+    output.with_suffix(output.suffix + ".meta.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return out
 
 
@@ -325,6 +349,7 @@ def main() -> None:
     parser.add_argument("--model-update-minutes", type=int, default=120)
     parser.add_argument("--train-window-minutes", type=int, default=BACKTEST_TRAIN_WINDOW_MINUTES)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--progress-every-steps", type=int, default=1000)
     parser.add_argument("--no-update-cache", action="store_true")
     parser.add_argument("--output", type=Path, default=DATA_DIR / "legacy_adaptive_rule_selected_stream.csv")
     parser.add_argument("--log", type=Path, default=None)
@@ -367,6 +392,7 @@ def main() -> None:
                 train_window_minutes=args.train_window_minutes,
                 max_steps=args.max_steps,
                 output=args.output,
+                progress_every_steps=args.progress_every_steps,
             )
     else:
         out = build_stream(
@@ -377,6 +403,7 @@ def main() -> None:
             train_window_minutes=args.train_window_minutes,
             max_steps=args.max_steps,
             output=args.output,
+            progress_every_steps=args.progress_every_steps,
         )
     valid = out[out["is_valid_signal"] == True]
     print("[legacy_stream] summary:")

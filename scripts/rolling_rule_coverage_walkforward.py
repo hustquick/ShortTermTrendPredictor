@@ -110,12 +110,20 @@ def main() -> None:
     parser.add_argument("--min-win-rate", type=float, default=0.75)
     parser.add_argument("--min-wilson-lower", type=float, default=0.68)
     parser.add_argument("--beam-size", type=int, default=80)
+    parser.add_argument("--require-step-minutes", type=int, default=None)
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
     df = _load_rows(args.csv)
     if df.empty:
         raise RuntimeError(f"empty csv: {args.csv}")
+    if args.require_step_minutes is not None:
+        observed_step = df["timestamp_dt"].sort_values().diff().dropna().dt.total_seconds().median() / 60
+        if pd.isna(observed_step) or abs(float(observed_step) - args.require_step_minutes) > 1e-6:
+            raise RuntimeError(
+                f"candidate stream step mismatch: expected {args.require_step_minutes} minutes, "
+                f"observed median {observed_step} minutes"
+            )
 
     report, signals = run_rolling_coverage(
         df=df,
