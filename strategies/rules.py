@@ -682,6 +682,7 @@ class AdaptiveRuleSwitchStrategy:
         macd_hist_diff = feature_value(features, "macd_hist_diff")
         ema_5_20_diff = feature_value(features, "ema_5_20_diff")
         boll_position = feature_value(features, "boll_position", 0.5)
+        boll_width = feature_value(features, "boll_width", 0.0)
         close_position = feature_value(features, "close_position", 0.5)
         trend = feature_value(features, "trend_agreement")
         rsi_14 = feature_value(features, "rsi_14", 50.0)

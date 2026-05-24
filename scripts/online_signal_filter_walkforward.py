@@ -6,6 +6,14 @@ import numpy as np
 import pandas as pd
 
 
+def _reason_value(reason: str, key: str) -> str:
+    prefix = f"{key}="
+    for part in str(reason).split(";"):
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return ""
+
+
 def _wilson_lower_bound(wins: int, samples: int, z: float = 1.96) -> float:
     if samples <= 0:
         return 0.0
@@ -57,6 +65,11 @@ def _load_rows(path: Path) -> pd.DataFrame:
     df = df[df["timestamp_dt"].notna()].copy()
     df["session"] = df["timestamp_dt"].dt.hour.map(_session)
     df["correct_bool"] = df["correct"].astype(str).str.lower().eq("true")
+    if "reason" in df:
+        reason = df["reason"].fillna("").astype(str)
+        if "rule" not in df:
+            df["rule"] = [_reason_value(item, "adaptive_rule") for item in reason]
+        df["adaptive_context"] = [_reason_value(item, "adaptive_context") for item in reason]
     return df.sort_values("timestamp_dt").reset_index(drop=True)
 
 
@@ -73,6 +86,16 @@ def _build_conditions(df: pd.DataFrame) -> list[tuple[str, np.ndarray]]:
             continue
         for value in sorted(v for v in df[column].dropna().unique() if str(v)):
             _add_condition(conditions, f"{column}={value}", df[column].eq(value))
+    if "adaptive_context" in df:
+        context_tokens = sorted({
+            token
+            for value in df["adaptive_context"].fillna("").astype(str)
+            for token in value.split("|")
+            if token
+        })
+        context_parts = df["adaptive_context"].fillna("").astype(str).str.split("|")
+        for token in context_tokens:
+            _add_condition(conditions, f"context={token}", context_parts.apply(lambda parts: token in parts))
 
     thresholds = {
         "up_probability": [0.10, 0.20, 0.35, 0.45, 0.55, 0.70, 0.85, 0.95, 0.98, 0.99],
@@ -205,7 +228,11 @@ def _apply_condition(df: pd.DataFrame, condition: str) -> pd.Series:
     for part in condition.split(" & "):
         if not part:
             continue
-        if "=" in part and "<=" not in part and ">" not in part:
+        if part.startswith("context="):
+            token = part.split("=", 1)[1]
+            context_parts = df["adaptive_context"].fillna("").astype(str).str.split("|")
+            mask &= context_parts.apply(lambda parts: token in parts)
+        elif "=" in part and "<=" not in part and ">" not in part:
             column, value = part.split("=", 1)
             mask &= df[column].astype(str).eq(value)
         elif "<=" in part:
