@@ -616,13 +616,22 @@ class AdaptiveRuleSwitchStrategy:
         ret_30 = feature_value(features, "ret_30")
         macd_hist = feature_value(features, "macd_hist")
         macd_hist_diff = feature_value(features, "macd_hist_diff")
+        ema_5_20_diff = feature_value(features, "ema_5_20_diff")
         boll_position = feature_value(features, "boll_position", 0.5)
         close_position = feature_value(features, "close_position", 0.5)
         trend = feature_value(features, "trend_agreement")
         rsi_14 = feature_value(features, "rsi_14", 50.0)
+        atr_14 = feature_value(features, "atr_14", 0.0)
+        volatility_30 = feature_value(features, "volatility_30", 0.0)
         volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+        quote_volume_ratio_10 = feature_value(features, "quote_volume_ratio_10", 1.0)
+        trade_count_ratio_10 = feature_value(features, "trade_count_ratio_10", 1.0)
+        taker_buy_ratio = feature_value(features, "taker_buy_ratio", 0.5)
         taker_buy_ratio_diff = feature_value(features, "taker_buy_ratio_diff_5_10", 0.0)
         direction_edge = float(prediction.get("direction_edge", 0.0))
+        session = _beijing_session_from_timestamp(feature_value(features, "timestamp"))
+        ret_short = ret_5 + ret_10
+        volatility_ref = max(abs(atr_14), abs(volatility_30))
 
         rules = []
 
@@ -662,6 +671,49 @@ class AdaptiveRuleSwitchStrategy:
             max(p_down_signal, 1.0 - p_up_raw),
         )
         add(
+            macd_hist < 0 and macd_hist_diff > 0 and trade_count_ratio_10 <= 0.80,
+            "short_macd_neg_rising_trades_quiet",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            macd_hist < 0
+            and macd_hist_diff > 0
+            and (volume_ratio_10 >= 1.20 or quote_volume_ratio_10 >= 1.20),
+            "short_macd_neg_rising_volume_active",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.20 and macd_hist < 0 and macd_hist_diff > 0,
+            "short_low_pup_macd_neg_rising",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            ret_30 > 0.0005
+            and 0.0005 < volatility_ref <= 0.0015
+            and trade_count_ratio_10 <= 0.80,
+            "short_ret30_up_midvol_trades_quiet",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            session == "asia_day"
+            and ret_short > 0.002
+            and p_up_raw <= 0.10
+            and abs(direction_edge) >= 0.60,
+            "short_asia_ret_short_surge_xlow_extreme",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            boll_position > 0.90 and macd_hist_diff > 0 and ret_30 > 0.0005,
+            "short_boll_upper_macd_rising_ret30_up",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
             p_up_raw <= 0.10 and abs(direction_edge) >= 0.60 and ret_30 > -0.001 and volume_ratio_10 <= 1.5,
             "short_xlow_pup_extreme_edge_ret30_floor_vol_ok",
             "down",
@@ -685,6 +737,15 @@ class AdaptiveRuleSwitchStrategy:
             and rsi_14 >= 60
             and 0.35 < boll_position <= 0.65,
             "short_xlow_pup_hot_rsi_boll_normal",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.10
+            and rsi_14 >= 60
+            and taker_buy_ratio > 0.55
+            and 0.65 < boll_position <= 0.90,
+            "short_xlow_hot_taker_buy_boll_highmid",
             "down",
             max(p_down_signal, 1.0 - p_up_raw),
         )
@@ -751,6 +812,32 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw >= 0.80 and macd_hist_diff > 0 and boll_position <= 0.80,
             "long_high_pup_macd_turn_not_high",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.55
+            and 0.45 <= taker_buy_ratio <= 0.55
+            and macd_hist < 0,
+            "long_pup_high_taker_balanced_macd_neg",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            session == "late_us"
+            and p_up_raw >= 0.55
+            and close_position <= 0.20
+            and 0.0005 < volatility_ref <= 0.0015,
+            "long_late_us_low_position_midvol",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.80
+            and ema_5_20_diff < 0
+            and macd_hist_diff > 0
+            and taker_buy_ratio_diff > 0,
+            "long_high_pup_ema_below_macd_turn_taker_buy",
             "up",
             max(p_up_signal, p_up_raw),
         )
