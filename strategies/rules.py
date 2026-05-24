@@ -159,10 +159,20 @@ def _adaptive_probability_context(prediction: dict) -> str:
 
 def _adaptive_feature_context(features, prediction: dict) -> str:
     rsi_14 = feature_value(features, "rsi_14", 50.0)
+    ret_5 = feature_value(features, "ret_5")
+    ret_10 = feature_value(features, "ret_10")
     ret_30 = feature_value(features, "ret_30")
+    macd_hist = feature_value(features, "macd_hist")
+    macd_hist_diff = feature_value(features, "macd_hist_diff")
+    ema_5_20_diff = feature_value(features, "ema_5_20_diff")
+    boll_position = feature_value(features, "boll_position", 0.5)
+    boll_width = feature_value(features, "boll_width", 0.0)
     close_position = feature_value(features, "close_position", 0.5)
     volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+    quote_volume_ratio_10 = feature_value(features, "quote_volume_ratio_10", 1.0)
+    trade_count_ratio_10 = feature_value(features, "trade_count_ratio_10", 1.0)
     taker_buy_ratio = feature_value(features, "taker_buy_ratio", 0.5)
+    taker_buy_ratio_diff_5_10 = feature_value(features, "taker_buy_ratio_diff_5_10", 0.0)
     trend = feature_value(features, "trend_agreement")
     trend_long = feature_value(features, "trend_agreement_long", trend)
     atr_14 = feature_value(features, "atr_14", 0.0)
@@ -179,6 +189,28 @@ def _adaptive_feature_context(features, prediction: dict) -> str:
         [(-0.002, "ret30_drop"), (-0.0005, "ret30_down"), (0.0005, "ret30_flat"), (0.002, "ret30_up")],
         "ret30_surge",
     )
+    ret_short_bucket = _bucket(
+        ret_5 + ret_10,
+        [(-0.002, "ret_short_drop"), (-0.0005, "ret_short_down"), (0.0005, "ret_short_flat"), (0.002, "ret_short_up")],
+        "ret_short_surge",
+    )
+    macd_bucket = "macd_pos" if macd_hist > 0 else "macd_neg" if macd_hist < 0 else "macd_flat"
+    macd_slope_bucket = (
+        "macd_rising" if macd_hist_diff > 0 else "macd_falling" if macd_hist_diff < 0 else "macd_stable"
+    )
+    ema_bucket = (
+        "ema_fast_above" if ema_5_20_diff > 0 else "ema_fast_below" if ema_5_20_diff < 0 else "ema_flat"
+    )
+    boll_bucket = _bucket(
+        boll_position,
+        [(0.10, "boll_lower"), (0.35, "boll_lowmid"), (0.65, "boll_mid"), (0.90, "boll_highmid")],
+        "boll_upper",
+    )
+    boll_width_bucket = _bucket(
+        boll_width,
+        [(0.004, "boll_narrow"), (0.010, "boll_normal"), (0.020, "boll_wide")],
+        "boll_extreme_wide",
+    )
     position_bucket = _bucket(
         close_position,
         [(0.20, "pos_low"), (0.50, "pos_midlow"), (0.80, "pos_midhigh"), (0.95, "pos_high")],
@@ -194,6 +226,11 @@ def _adaptive_feature_context(features, prediction: dict) -> str:
         [(0.45, "taker_sell"), (0.55, "taker_balanced")],
         "taker_buy",
     )
+    taker_flow_bucket = _bucket(
+        taker_buy_ratio_diff_5_10,
+        [(-0.03, "taker_flow_sell"), (0.03, "taker_flow_flat")],
+        "taker_flow_buy",
+    )
     trend_sum = trend + 0.5 * trend_long
     trend_bucket = _bucket(
         trend_sum,
@@ -205,10 +242,22 @@ def _adaptive_feature_context(features, prediction: dict) -> str:
         [(0.0005, "volatility_low"), (0.0015, "volatility_mid")],
         "volatility_high",
     )
+    quote_volume_bucket = _bucket(
+        quote_volume_ratio_10,
+        [(0.80, "quote_vol_quiet"), (1.20, "quote_vol_normal"), (1.80, "quote_vol_active")],
+        "quote_vol_shock",
+    )
+    trade_count_bucket = _bucket(
+        trade_count_ratio_10,
+        [(0.80, "trades_quiet"), (1.20, "trades_normal"), (1.80, "trades_active")],
+        "trades_shock",
+    )
     probability_context = _adaptive_probability_context(prediction)
     return (
-        f"{probability_context}|{rsi_bucket}|{ret_bucket}|{position_bucket}|"
-        f"{volume_bucket}|{taker_bucket}|{trend_bucket}|{volatility_bucket}"
+        f"{probability_context}|{rsi_bucket}|{ret_bucket}|{ret_short_bucket}|"
+        f"{macd_bucket}|{macd_slope_bucket}|{ema_bucket}|{boll_bucket}|{boll_width_bucket}|"
+        f"{position_bucket}|{volume_bucket}|{quote_volume_bucket}|{trade_count_bucket}|"
+        f"{taker_bucket}|{taker_flow_bucket}|{trend_bucket}|{volatility_bucket}"
     )
 
 
@@ -474,16 +523,20 @@ class AdaptiveRuleSwitchStrategy:
     def __init__(self):
         self.records: list[dict] = []
         self.cooldowns: dict[str, int] = {}
+        self._pending_observations: list[dict] = []
 
     def decide(self, features, prediction: dict) -> StrategyDecision:
         candidates = self._candidate_rules(features, prediction)
         if not candidates:
+            self._pending_observations = []
             return StrategyDecision("no_trade", 0.0, "adaptive_rule_switch_no_candidate")
 
         regime = classify_market_regime(features)
         session = _beijing_session_from_timestamp(feature_value(features, "timestamp"))
         adaptive_context = _adaptive_feature_context(features, prediction)
+        timestamp_ms = int(feature_value(features, "timestamp", 0.0))
         scored = []
+        pending = []
         for rule in candidates:
             context_tokens = self._context_tokens(
                 rule_name=rule["name"],
@@ -498,9 +551,21 @@ class AdaptiveRuleSwitchStrategy:
                 session,
                 adaptive_context,
                 context_tokens,
-                feature_value(features, "timestamp"),
+                timestamp_ms,
             )
-            scored.append({**rule, **stats})
+            state_reason = self._state_reason(features, prediction, rule["direction"])
+            scored.append({**rule, **stats, "state_reason": state_reason})
+            pending.append({
+                "rule": rule["name"],
+                "direction": rule["direction"],
+                "regime": regime,
+                "session": session,
+                "context": adaptive_context,
+                "tokens": context_tokens,
+                "timestamp_ms": timestamp_ms,
+                "state_ok": _reason_value(state_reason, "state_ok") == "True",
+            })
+        self._pending_observations = pending
 
         active = [
             item for item in scored
@@ -511,7 +576,11 @@ class AdaptiveRuleSwitchStrategy:
             and not item["context_veto"]
         ]
         if active:
-            selected = sorted(active, key=lambda x: (x["win_rate"], x["samples"], x["confidence"]), reverse=True)[0]
+            selected = sorted(
+                active,
+                key=lambda x: (x.get("wilson_lower", 0.0), x["win_rate"], x["samples"], x["confidence"]),
+                reverse=True,
+            )[0]
             mode = "active"
         else:
             selected = sorted(scored, key=lambda x: (x["samples"], x["confidence"]), reverse=True)[0]
@@ -528,8 +597,8 @@ class AdaptiveRuleSwitchStrategy:
             f"context_veto={str(selected['context_veto'])};"
             f"miner_condition={selected.get('condition', '')};"
             f"miner_lookback_days={selected.get('lookback_days', '')};"
-            f"adaptive_timestamp_ms={int(feature_value(features, 'timestamp', 0.0))};"
-            f"{self._state_reason(features, prediction, selected['direction'])}"
+            f"adaptive_timestamp_ms={timestamp_ms};"
+            f"{selected['state_reason']}"
         )
         return StrategyDecision(selected["direction"], selected["confidence"], reason)
 
@@ -543,6 +612,9 @@ class AdaptiveRuleSwitchStrategy:
         boll_position = feature_value(features, "boll_position", 0.5)
         close_position = feature_value(features, "close_position", 0.5)
         trend = feature_value(features, "trend_agreement")
+        rsi_14 = feature_value(features, "rsi_14", 50.0)
+        volume_ratio_10 = feature_value(features, "volume_ratio_10", 1.0)
+        direction_edge = float(prediction.get("direction_edge", 0.0))
 
         rules = []
 
@@ -564,6 +636,42 @@ class AdaptiveRuleSwitchStrategy:
             max(p_down_signal, 1.0 - p_up_raw),
         )
         add(
+            p_up_raw <= 0.10 and abs(direction_edge) >= 0.60 and ret_30 > -0.001 and volume_ratio_10 <= 1.5,
+            "short_xlow_pup_extreme_edge_ret30_floor_vol_ok",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.20 and abs(direction_edge) >= 0.60 and rsi_14 > 55 and volume_ratio_10 <= 2.0,
+            "short_low_pup_extreme_edge_rsi_warm_vol_ok",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.20 and abs(direction_edge) >= 0.35 and rsi_14 >= 60,
+            "short_low_pup_hot_rsi_edge",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.12 and close_position >= 0.80 and ret_30 >= -0.0005,
+            "short_xlow_pup_high_position_not_breakdown",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.35 and rsi_14 <= 60 and close_position <= 0.95 and volume_ratio_10 > 0.8,
+            "short_midlow_pup_rsi_not_hot_not_extreme_low_volume",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.45 and ret_30 > 0.001 and close_position <= 0.8,
+            "short_pullback_after_up_move_not_high_close",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
             p_up_raw >= 0.98 and boll_position < 0.85,
             "long_pup_ge_098_not_high",
             "up",
@@ -578,6 +686,18 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw >= 0.55 and boll_position < 0.85,
             "long_pup_ge_055_not_high",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.90 and abs(direction_edge) >= 0.60 and rsi_14 < 45 and volume_ratio_10 <= 1.5,
+            "long_high_pup_extreme_edge_rsi_cool_vol_ok",
+            "up",
+            max(p_up_signal, p_up_raw),
+        )
+        add(
+            p_up_raw >= 0.80 and ret_30 < -0.001 and close_position >= 0.2 and volume_ratio_10 <= 2.0,
+            "long_rebound_after_down_move_position_ok",
             "up",
             max(p_up_signal, p_up_raw),
         )
@@ -882,32 +1002,55 @@ class AdaptiveRuleSwitchStrategy:
         }
 
     def observe_result(self, decision: StrategyDecision, correct: bool):
-        rule = _reason_value(decision.reason, "adaptive_rule")
-        if not rule:
+        if decision.direction not in {"up", "down"}:
+            self._pending_observations = []
             return
+        selected_rule = _reason_value(decision.reason, "adaptive_rule")
+        if not selected_rule:
+            self._pending_observations = []
+            return
+        actual_direction = decision.direction if correct else ("down" if decision.direction == "up" else "up")
         regime = _reason_value(decision.reason, "adaptive_regime")
         session = _reason_value(decision.reason, "adaptive_session")
         adaptive_context = _reason_value(decision.reason, "adaptive_context")
-        direction = decision.direction
-        tokens = self._context_tokens(rule, direction, regime, session, adaptive_context)
         condition = _reason_value(decision.reason, "miner_condition")
         scope = _reason_value(decision.reason, "rule_scope")
         try:
             timestamp_ms = int(_reason_value(decision.reason, "adaptive_timestamp_ms") or 0)
         except ValueError:
             timestamp_ms = 0
-        self.records.append({
-            "rule": rule,
+        pending = self._pending_observations or [{
+            "rule": selected_rule,
+            "direction": decision.direction,
             "regime": regime,
             "session": session,
             "context": adaptive_context,
-            "tokens": tokens,
-            "condition": condition,
-            "scope": scope,
+            "tokens": self._context_tokens(selected_rule, decision.direction, regime, session, adaptive_context),
             "timestamp_ms": timestamp_ms,
             "state_ok": _reason_value(decision.reason, "state_ok") == "True",
-            "correct": bool(correct),
-        })
+        }]
+        for item in pending:
+            row_condition = condition if item["rule"] == selected_rule else ""
+            row_scope = scope if item["rule"] == selected_rule else "candidate_shadow"
+            self.records.append({
+                "rule": item["rule"],
+                "regime": item.get("regime", regime),
+                "session": item.get("session", session),
+                "context": item.get("context", adaptive_context),
+                "tokens": item.get("tokens") or self._context_tokens(
+                    item["rule"],
+                    item["direction"],
+                    item.get("regime", regime),
+                    item.get("session", session),
+                    item.get("context", adaptive_context),
+                ),
+                "condition": row_condition,
+                "scope": row_scope,
+                "timestamp_ms": item.get("timestamp_ms", timestamp_ms),
+                "state_ok": bool(item.get("state_ok")),
+                "correct": item["direction"] == actual_direction,
+            })
+        self._pending_observations = []
         if scope == "online_miner" and condition and not correct:
             rows = [
                 row for row in self.records

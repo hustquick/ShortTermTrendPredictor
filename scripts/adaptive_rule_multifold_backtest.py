@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+from unittest.mock import patch
 from pathlib import Path
 
 import pandas as pd
@@ -53,6 +54,12 @@ def main():
     parser.add_argument("--max-steps-per-fold", type=int, default=None)
     parser.add_argument("--min-win-rate", type=float, default=0.75)
     parser.add_argument("--min-signals-per-day", type=float, default=10.0)
+    parser.add_argument("--miner-min-samples", type=int, default=None)
+    parser.add_argument("--miner-min-win-rate", type=float, default=None)
+    parser.add_argument("--miner-min-wilson-lower", type=float, default=None)
+    parser.add_argument("--switch-min-samples", type=int, default=None)
+    parser.add_argument("--switch-min-wilson-lower", type=float, default=None)
+    parser.add_argument("--switch-rolling-window", type=int, default=None)
     parser.add_argument("--backtest-log", default=None)
     parser.add_argument("--no-update-cache", action="store_true")
     parser.add_argument("--output-prefix", default="adaptive_rule_switch_multifold")
@@ -78,57 +85,77 @@ def main():
     result_parts = []
     summaries = []
 
-    for fold in range(1, args.folds + 1):
-        fold_start = test_start + (fold - 1) * fold_size
-        fold_end = test_start + (fold * fold_size if fold < args.folds else test_minutes)
-        slice_start = max(0, fold_start - args.train_window_minutes)
-        slice_end = min(len(df), fold_end + PREDICT_HORIZON_MINUTES + 1)
-        fold_df = df.iloc[slice_start:slice_end].copy().reset_index(drop=True)
-        fold_start_time = ms_to_beijing_time(int(df.iloc[fold_start]["timestamp"]))
-        fold_end_time = ms_to_beijing_time(int(df.iloc[fold_end - 1]["timestamp"]))
-        print(f"[adaptive_rule_multifold] fold={fold}/{args.folds} {fold_start_time} -> {fold_end_time}")
+    patch_values = {}
+    if args.miner_min_samples is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_MINER_MIN_SAMPLES"] = args.miner_min_samples
+    if args.miner_min_win_rate is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_MINER_MIN_WIN_RATE"] = args.miner_min_win_rate
+    if args.miner_min_wilson_lower is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER"] = args.miner_min_wilson_lower
+        patch_values["realtime_strategy_runner.ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER"] = args.miner_min_wilson_lower
+    if args.switch_min_wilson_lower is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER"] = args.switch_min_wilson_lower
+    if args.switch_min_samples is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_SWITCH_MIN_SAMPLES"] = args.switch_min_samples
+    if args.switch_rolling_window is not None:
+        patch_values["strategies.rules.ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW"] = args.switch_rolling_window
 
-        if args.backtest_log:
-            log_path = Path(args.backtest_log)
-            log_path.parent.mkdir(exist_ok=True)
-            with log_path.open("a", encoding="utf-8") as log_file:
-                print(
-                    f"[adaptive_rule_multifold] fold={fold}/{args.folds} log redirected",
-                    file=log_file,
-                )
-                with contextlib.redirect_stdout(log_file):
-                    result = strict_walk_forward_backtest(
-                        fold_df,
-                        train_window_minutes=args.train_window_minutes,
-                        step_minutes=args.step_minutes,
-                        model_update_minutes=args.model_update_minutes,
-                        min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
-                        max_steps=args.max_steps_per_fold,
-                        progress_every=500,
-                        use_walk_forward_match_pool=False,
+    patch_stack = contextlib.ExitStack()
+    for target, value in patch_values.items():
+        patch_stack.enter_context(patch(target, value))
+
+    with patch_stack:
+        for fold in range(1, args.folds + 1):
+            fold_start = test_start + (fold - 1) * fold_size
+            fold_end = test_start + (fold * fold_size if fold < args.folds else test_minutes)
+            slice_start = max(0, fold_start - args.train_window_minutes)
+            slice_end = min(len(df), fold_end + PREDICT_HORIZON_MINUTES + 1)
+            fold_df = df.iloc[slice_start:slice_end].copy().reset_index(drop=True)
+            fold_start_time = ms_to_beijing_time(int(df.iloc[fold_start]["timestamp"]))
+            fold_end_time = ms_to_beijing_time(int(df.iloc[fold_end - 1]["timestamp"]))
+            print(f"[adaptive_rule_multifold] fold={fold}/{args.folds} {fold_start_time} -> {fold_end_time}")
+
+            if args.backtest_log:
+                log_path = Path(args.backtest_log)
+                log_path.parent.mkdir(exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as log_file:
+                    print(
+                        f"[adaptive_rule_multifold] fold={fold}/{args.folds} log redirected",
+                        file=log_file,
                     )
-        else:
-            result = strict_walk_forward_backtest(
-                fold_df,
-                train_window_minutes=args.train_window_minutes,
-                step_minutes=args.step_minutes,
-                model_update_minutes=args.model_update_minutes,
-                min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
-                max_steps=args.max_steps_per_fold,
-                progress_every=500,
-                use_walk_forward_match_pool=False,
-            )
-        if result.empty:
-            continue
-        result["fold"] = fold
-        result["fold_start"] = fold_start_time
-        result["fold_end"] = fold_end_time
-        result_parts.append(result)
-        summaries.append(_fold_summary(result, fold, fold_start_time, fold_end_time))
+                    with contextlib.redirect_stdout(log_file):
+                        result = strict_walk_forward_backtest(
+                            fold_df,
+                            train_window_minutes=args.train_window_minutes,
+                            step_minutes=args.step_minutes,
+                            model_update_minutes=args.model_update_minutes,
+                            min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
+                            max_steps=args.max_steps_per_fold,
+                            progress_every=500,
+                            use_walk_forward_match_pool=False,
+                        )
+            else:
+                result = strict_walk_forward_backtest(
+                    fold_df,
+                    train_window_minutes=args.train_window_minutes,
+                    step_minutes=args.step_minutes,
+                    model_update_minutes=args.model_update_minutes,
+                    min_train_samples=BACKTEST_MIN_TRAIN_SAMPLES,
+                    max_steps=args.max_steps_per_fold,
+                    progress_every=500,
+                    use_walk_forward_match_pool=False,
+                )
+            if result.empty:
+                continue
+            result["fold"] = fold
+            result["fold_start"] = fold_start_time
+            result["fold_end"] = fold_end_time
+            result_parts.append(result)
+            summaries.append(_fold_summary(result, fold, fold_start_time, fold_end_time))
 
-        fold_path = DATA_DIR / f"{args.output_prefix}_fold{fold}.csv"
-        result.to_csv(fold_path, index=False)
-        print(f"[adaptive_rule_multifold] fold result saved: {fold_path}")
+            fold_path = DATA_DIR / f"{args.output_prefix}_fold{fold}.csv"
+            result.to_csv(fold_path, index=False)
+            print(f"[adaptive_rule_multifold] fold result saved: {fold_path}")
 
     combined = pd.concat(result_parts, ignore_index=True) if result_parts else pd.DataFrame()
     summary_df = pd.DataFrame(summaries)
