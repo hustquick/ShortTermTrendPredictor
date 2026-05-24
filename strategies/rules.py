@@ -63,6 +63,15 @@ from strategies.base import StrategyDecision, feature_value
 
 VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 
+ADAPTIVE_RULE_EXPLICIT_CONTEXT_FILTERS = {
+    "short_pup_le_045": (
+        ("ctx=ema_fast_above", "ctx=macd_rising", "ctx=boll_normal"),
+    ),
+    "short_pup_le_050_not_low": (
+        ("ctx=ema_fast_above", "ctx=macd_rising", "ctx=boll_normal"),
+    ),
+}
+
 
 def _short_rebound_trap_reason(features) -> str | None:
     ret_10 = feature_value(features, "ret_10")
@@ -1171,6 +1180,27 @@ class AdaptiveRuleSwitchStrategy:
         tokens.extend(f"ctx={token}" for token in adaptive_context.split("|") if token)
         return tuple(sorted(set(tokens)))
 
+    @staticmethod
+    def _condition_key(condition_tokens: tuple[str, ...]) -> str:
+        return ",".join(tuple(sorted(condition_tokens)))
+
+    @staticmethod
+    def _tokens_match_condition(context_tokens: tuple[str, ...], condition_tokens: tuple[str, ...]) -> bool:
+        return set(condition_tokens).issubset(set(context_tokens))
+
+    def _matching_explicit_context_filter(
+        self,
+        rule_name: str,
+        context_tokens: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        filters = ADAPTIVE_RULE_EXPLICIT_CONTEXT_FILTERS.get(rule_name)
+        if not filters:
+            return ()
+        for condition_tokens in filters:
+            if self._tokens_match_condition(context_tokens, condition_tokens):
+                return condition_tokens
+        return None
+
     def _recent_records(
         self,
         timestamp_ms: float | None = None,
@@ -1237,6 +1267,7 @@ class AdaptiveRuleSwitchStrategy:
         rule_name: str,
         direction: str,
         context_tokens: tuple[str, ...],
+        required_condition_tokens: tuple[str, ...] = (),
         timestamp_ms: float | None = None,
     ) -> dict | None:
         if not ADAPTIVE_RULE_MINER_ENABLED or not self.records:
@@ -1259,6 +1290,7 @@ class AdaptiveRuleSwitchStrategy:
             window = [
                 row for row in self._recent_records(timestamp_ms, lookback_days=lookback_days)
                 if row.get("rule") == rule_name and row.get("state_ok")
+                and self._tokens_match_condition(row.get("tokens", ()), required_condition_tokens)
             ]
             if len(window) < min_samples:
                 continue
@@ -1273,10 +1305,11 @@ class AdaptiveRuleSwitchStrategy:
             ]
             for clause_count in range(1, min(max_clauses, len(search_tokens)) + 1):
                 for combo in itertools.combinations(search_tokens, clause_count):
-                    condition = ",".join(combo)
+                    condition_tokens = tuple(sorted(set(required_condition_tokens).union(combo)))
+                    condition = self._condition_key(condition_tokens)
                     if self._condition_in_cooldown(condition):
                         continue
-                    combo_set = set(combo)
+                    combo_set = set(condition_tokens)
                     rows = [
                         row for row, token_set in window_sets
                         if combo_set.issubset(token_set)
@@ -1328,13 +1361,29 @@ class AdaptiveRuleSwitchStrategy:
         timestamp_ms: float | None,
     ) -> dict:
         direction = "up" if "long" in rule_name else "down"
-        mined_stats = self._mine_rule_stats(rule_name, direction, context_tokens, timestamp_ms)
+        explicit_condition = self._matching_explicit_context_filter(rule_name, context_tokens)
+        if explicit_condition is None:
+            return {
+                **self._empty_stats(),
+                "scope": "explicit_context_miss",
+                "context_veto": True,
+                "condition": "explicit_context_miss",
+            }
+        required_condition_tokens = explicit_condition or ()
+
+        mined_stats = self._mine_rule_stats(
+            rule_name,
+            direction,
+            context_tokens,
+            required_condition_tokens=required_condition_tokens,
+            timestamp_ms=timestamp_ms,
+        )
         if mined_stats is not None:
             return mined_stats
 
-        global_stats = self._rule_stats(rule_name)
+        global_stats = self._rule_stats(rule_name, condition_tokens=required_condition_tokens)
         if not ADAPTIVE_RULE_SWITCH_REGIME_ENABLED:
-            return {**global_stats, "scope": "global"}
+            return {**global_stats, "scope": "global", "condition": self._condition_key(required_condition_tokens)}
 
         if ADAPTIVE_RULE_SWITCH_CONTEXT_ENABLED:
             if ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_ENABLED:
@@ -1343,6 +1392,7 @@ class AdaptiveRuleSwitchStrategy:
                     regime=regime,
                     session=session,
                     adaptive_context=adaptive_context,
+                    condition_tokens=required_condition_tokens,
                 )
                 if micro_context_stats["samples"] >= ADAPTIVE_RULE_SWITCH_MICRO_CONTEXT_MIN_SAMPLES:
                     context_veto = (
@@ -1357,14 +1407,19 @@ class AdaptiveRuleSwitchStrategy:
                         }
                     return {**micro_context_stats, "scope": "micro_context"}
 
-            session_stats = self._rule_stats(rule_name, regime=regime, session=session)
+            session_stats = self._rule_stats(
+                rule_name,
+                regime=regime,
+                session=session,
+                condition_tokens=required_condition_tokens,
+            )
             if session_stats["samples"] >= ADAPTIVE_RULE_SWITCH_CONTEXT_MIN_SAMPLES:
                 context_veto = session_stats["win_rate"] < ADAPTIVE_RULE_SWITCH_CONTEXT_DISABLE_WIN_RATE
                 if context_veto:
                     return {**session_stats, "scope": "session_context_veto", "context_veto": True}
                 return {**session_stats, "scope": "session_context"}
 
-        regime_stats = self._rule_stats(rule_name, regime)
+        regime_stats = self._rule_stats(rule_name, regime, condition_tokens=required_condition_tokens)
         if regime_stats["samples"] >= ADAPTIVE_RULE_SWITCH_REGIME_MIN_SAMPLES:
             return {**regime_stats, "scope": "regime"}
 
@@ -1379,7 +1434,9 @@ class AdaptiveRuleSwitchStrategy:
         regime: str | None = None,
         session: str | None = None,
         adaptive_context: str | None = None,
+        condition_tokens: tuple[str, ...] = (),
     ) -> dict:
+        condition = self._condition_key(condition_tokens)
         if self.records:
             rows = [
                 row for row in self.records
@@ -1388,10 +1445,11 @@ class AdaptiveRuleSwitchStrategy:
                 and (regime is None or row.get("regime") == regime)
                 and (session is None or row.get("session") == session)
                 and (adaptive_context is None or row.get("context") == adaptive_context)
+                and self._tokens_match_condition(row.get("tokens", ()), condition_tokens)
             ][-ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW:]
             samples = len(rows)
             if samples == 0:
-                return self._empty_stats()
+                return {**self._empty_stats(), "condition": condition}
             wins = sum(bool(row.get("correct")) for row in rows)
             recent_loss_streak = 0
             for row in reversed(rows):
@@ -1407,16 +1465,16 @@ class AdaptiveRuleSwitchStrategy:
                 "min_wilson_lower": ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
                 "recent_loss_streak": recent_loss_streak,
                 "context_veto": False,
-                "condition": "",
+                "condition": condition,
             }
         if not VALIDATED_STRATEGY_SIGNALS.exists() or VALIDATED_STRATEGY_SIGNALS.stat().st_size == 0:
-            return self._empty_stats()
+            return {**self._empty_stats(), "condition": condition}
         try:
             df = pd.read_csv(VALIDATED_STRATEGY_SIGNALS)
         except Exception:
-            return self._empty_stats()
+            return {**self._empty_stats(), "condition": condition}
         if df.empty or "reason" not in df.columns:
-            return self._empty_stats()
+            return {**self._empty_stats(), "condition": condition}
         reason = df["reason"].fillna("").astype(str)
         mask = (
             (df.get("strategy") == self.name)
@@ -1429,10 +1487,15 @@ class AdaptiveRuleSwitchStrategy:
             mask &= reason.str.contains(f"adaptive_session={session}", regex=False)
         if adaptive_context is not None:
             mask &= reason.str.contains(f"adaptive_context={adaptive_context}", regex=False)
+        for token in condition_tokens:
+            if token.startswith("ctx="):
+                mask &= reason.str.contains(token[len("ctx="):], regex=False)
+            else:
+                mask &= reason.str.contains(token, regex=False)
         rows = df[mask].tail(ADAPTIVE_RULE_SWITCH_ROLLING_WINDOW)
         samples = int(len(rows))
         if samples == 0:
-            return self._empty_stats()
+            return {**self._empty_stats(), "condition": condition}
         correct = rows["correct"].astype(str).str.lower().eq("true").tolist()
         wins = int(sum(correct))
         recent_loss_streak = 0
@@ -1449,7 +1512,7 @@ class AdaptiveRuleSwitchStrategy:
             "min_wilson_lower": ADAPTIVE_RULE_SWITCH_MIN_WILSON_LOWER,
             "recent_loss_streak": recent_loss_streak,
             "context_veto": False,
-            "condition": "",
+            "condition": condition,
         }
 
     def observe_result(self, decision: StrategyDecision, correct: bool):
