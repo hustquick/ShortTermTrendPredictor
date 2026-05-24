@@ -13,6 +13,9 @@ from config import (
     ADAPTIVE_RULE_MINER_LOOKBACK_DAY_OPTIONS,
     ADAPTIVE_RULE_MINER_LOOKBACK_DAYS,
     ADAPTIVE_RULE_MINER_LOOKBACK_SIGNALS,
+    ADAPTIVE_RULE_MINER_LONG_MIN_SAMPLES,
+    ADAPTIVE_RULE_MINER_LONG_MIN_WILSON_LOWER,
+    ADAPTIVE_RULE_MINER_LONG_MIN_WIN_RATE,
     ADAPTIVE_RULE_MINER_MAX_CLAUSES,
     ADAPTIVE_RULE_MINER_MIN_SAMPLES,
     ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER,
@@ -632,6 +635,7 @@ class AdaptiveRuleSwitchStrategy:
         session = _beijing_session_from_timestamp(feature_value(features, "timestamp"))
         ret_short = ret_5 + ret_10
         volatility_ref = max(abs(atr_14), abs(volatility_30))
+        trend_sum = trend + 0.5 * feature_value(features, "trend_agreement_long", trend)
 
         rules = []
 
@@ -714,6 +718,55 @@ class AdaptiveRuleSwitchStrategy:
             max(p_down_signal, 1.0 - p_up_raw),
         )
         add(
+            p_up_raw <= 0.10
+            and boll_position > 0.90
+            and macd_hist > 0
+            and macd_hist_diff > 0
+            and ret_30 > 0.0005
+            and taker_buy_ratio <= 0.45,
+            "short_boll_upper_xlow_macd_pos_taker_sell",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.10
+            and boll_position > 0.90
+            and macd_hist_diff > 0
+            and ret_short > 0.002
+            and taker_buy_ratio <= 0.45,
+            "short_boll_upper_xlow_ret_surge_taker_sell",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.10
+            and boll_position > 0.90
+            and macd_hist_diff > 0
+            and abs(taker_buy_ratio_diff) <= 0.03
+            and taker_buy_ratio <= 0.45,
+            "short_boll_upper_xlow_flow_flat_taker_sell",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            boll_position > 0.90
+            and macd_hist_diff > 0
+            and rsi_14 >= 70
+            and taker_buy_ratio <= 0.45,
+            "short_boll_upper_rsi_hot_taker_sell",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
+            and 0.65 < boll_position <= 0.90
+            and macd_hist_diff < 0
+            and ret_30 > 0.0005,
+            "short_boll_highmid_macd_falling_ret30_up",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
             p_up_raw <= 0.10 and abs(direction_edge) >= 0.60 and ret_30 > -0.001 and volume_ratio_10 <= 1.5,
             "short_xlow_pup_extreme_edge_ret30_floor_vol_ok",
             "down",
@@ -728,6 +781,46 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw <= 0.20 and abs(direction_edge) >= 0.35 and rsi_14 >= 60,
             "short_low_pup_hot_rsi_edge",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.20
+            and abs(direction_edge) >= 0.35
+            and rsi_14 >= 60
+            and ret_short > 0.002
+            and macd_hist_diff > 0
+            and taker_buy_ratio <= 0.45,
+            "short_hot_low_pup_ret_surge_macd_rising_taker_sell",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.20
+            and abs(direction_edge) >= 0.35
+            and rsi_14 >= 60
+            and trade_count_ratio_10 <= 0.80
+            and boll_width <= 0.004
+            and abs(taker_buy_ratio_diff) <= 0.03,
+            "short_hot_low_pup_quiet_narrow_flat_flow",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
+            and rsi_14 >= 70
+            and macd_hist > 0
+            and 0.50 < close_position <= 0.80,
+            "short_hot_rsi_macd_pos_midhigh_position",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
+            and rsi_14 >= 70
+            and trend > 0
+            and 0.50 < close_position <= 0.80,
+            "short_hot_rsi_trend_up_midhigh_position",
             "down",
             max(p_down_signal, 1.0 - p_up_raw),
         )
@@ -764,6 +857,48 @@ class AdaptiveRuleSwitchStrategy:
         add(
             p_up_raw <= 0.45 and ret_30 > 0.001 and close_position <= 0.8,
             "short_pullback_after_up_move_not_high_close",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.45
+            and ret_30 > 0.001
+            and close_position <= 0.80
+            and boll_width <= 0.004
+            and trend_sum > 0.75
+            and macd_hist_diff > 0,
+            "short_pullback_narrow_trend_up_macd_rising",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.45
+            and ret_30 > 0.001
+            and close_position <= 0.80
+            and ret_short > 0.0005
+            and trend_sum > 0.75
+            and macd_hist_diff > 0,
+            "short_pullback_ret_short_up_trend_up_macd_rising",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= 0.45
+            and ret_30 > 0.001
+            and close_position <= 0.80
+            and boll_width <= 0.004
+            and macd_hist > 0
+            and taker_buy_ratio > 0.55,
+            "short_pullback_narrow_macd_pos_taker_buy",
+            "down",
+            max(p_down_signal, 1.0 - p_up_raw),
+        )
+        add(
+            p_up_raw <= ADAPTIVE_RULE_SWITCH_MAX_UP_PROBABILITY
+            and rsi_14 >= 70
+            and ret_30 > 0.001
+            and 0.50 < close_position <= 0.80,
+            "short_hot_rsi_ret_surge_midhigh_position",
             "down",
             max(p_down_signal, 1.0 - p_up_raw),
         )
@@ -998,11 +1133,20 @@ class AdaptiveRuleSwitchStrategy:
     def _mine_rule_stats(
         self,
         rule_name: str,
+        direction: str,
         context_tokens: tuple[str, ...],
         timestamp_ms: float | None = None,
     ) -> dict | None:
         if not ADAPTIVE_RULE_MINER_ENABLED or not self.records:
             return None
+
+        min_samples = ADAPTIVE_RULE_MINER_MIN_SAMPLES
+        min_win_rate = ADAPTIVE_RULE_MINER_MIN_WIN_RATE
+        min_wilson_lower = ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER
+        if direction == "up":
+            min_samples = max(min_samples, ADAPTIVE_RULE_MINER_LONG_MIN_SAMPLES)
+            min_win_rate = max(min_win_rate, ADAPTIVE_RULE_MINER_LONG_MIN_WIN_RATE)
+            min_wilson_lower = max(min_wilson_lower, ADAPTIVE_RULE_MINER_LONG_MIN_WILSON_LOWER)
 
         best = None
         max_clauses = max(1, ADAPTIVE_RULE_MINER_MAX_CLAUSES)
@@ -1014,12 +1158,12 @@ class AdaptiveRuleSwitchStrategy:
                 row for row in self._recent_records(timestamp_ms, lookback_days=lookback_days)
                 if row.get("rule") == rule_name and row.get("state_ok")
             ]
-            if len(window) < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
+            if len(window) < min_samples:
                 continue
             search_tokens = self._miner_search_tokens(
                 context_tokens,
                 window,
-                ADAPTIVE_RULE_MINER_MIN_SAMPLES,
+                min_samples,
             )
             window_sets = [
                 (row, set(row.get("tokens", ())))
@@ -1036,13 +1180,13 @@ class AdaptiveRuleSwitchStrategy:
                         if combo_set.issubset(token_set)
                     ]
                     samples = len(rows)
-                    if samples < ADAPTIVE_RULE_MINER_MIN_SAMPLES:
+                    if samples < min_samples:
                         continue
                     wins = sum(bool(row.get("correct")) for row in rows)
                     win_rate = wins / samples
                     wilson_lower = _wilson_lower_bound(wins, samples)
                     recent_loss_streak = self._condition_loss_streak(rows)
-                    if win_rate < ADAPTIVE_RULE_MINER_MIN_WIN_RATE:
+                    if win_rate < min_win_rate or wilson_lower < min_wilson_lower:
                         continue
                     if recent_loss_streak > ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK:
                         continue
@@ -1050,9 +1194,9 @@ class AdaptiveRuleSwitchStrategy:
                         "samples": samples,
                         "wins": wins,
                         "win_rate": float(win_rate),
-                        "min_win_rate": ADAPTIVE_RULE_MINER_MIN_WIN_RATE,
+                        "min_win_rate": min_win_rate,
                         "wilson_lower": float(wilson_lower),
-                        "min_wilson_lower": ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER,
+                        "min_wilson_lower": min_wilson_lower,
                         "recent_loss_streak": recent_loss_streak,
                         "context_veto": False,
                         "condition": condition,
@@ -1081,7 +1225,8 @@ class AdaptiveRuleSwitchStrategy:
         context_tokens: tuple[str, ...],
         timestamp_ms: float | None,
     ) -> dict:
-        mined_stats = self._mine_rule_stats(rule_name, context_tokens, timestamp_ms)
+        direction = "up" if "long" in rule_name else "down"
+        mined_stats = self._mine_rule_stats(rule_name, direction, context_tokens, timestamp_ms)
         if mined_stats is not None:
             return mined_stats
 
