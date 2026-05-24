@@ -66,9 +66,61 @@ VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 ADAPTIVE_RULE_EXPLICIT_CONTEXT_FILTERS = {
     "short_pup_le_045": (
         ("ctx=ema_fast_above", "ctx=macd_rising", "ctx=boll_normal"),
+        ("ctx=macd_rising", "ctx=ret_short_surge", "ctx=boll_normal"),
+        ("ctx=macd_rising", "ctx=ret_short_surge", "ctx=ret30_surge"),
+        ("session=us_open", "ctx=ret_short_surge"),
     ),
     "short_pup_le_050_not_low": (
         ("ctx=ema_fast_above", "ctx=macd_rising", "ctx=boll_normal"),
+        ("ctx=macd_rising", "ctx=ret_short_surge", "ctx=boll_normal"),
+        ("ctx=macd_rising", "ctx=ret_short_surge", "ctx=ret30_surge"),
+        ("session=us_open", "ctx=ret_short_surge"),
+    ),
+    "short_xlow_pup_high_position_not_breakdown": (
+        ("ctx=ema_fast_above", "ctx=macd_rising", "ctx=boll_normal"),
+        ("ctx=macd_pos", "ctx=macd_rising", "ctx=boll_normal"),
+        ("ctx=volatility_mid", "ctx=pos_high"),
+        ("ctx=trend_up", "ctx=rsi_mid"),
+    ),
+    "short_signal_edge_down": (
+        ("ctx=ret30_surge", "ctx=ret_short_surge"),
+        ("ctx=ema_fast_above", "ctx=ret30_surge", "ctx=ret_short_surge"),
+    ),
+    "long_feature_oversold_volume_rebound": (
+        ("ctx=volatility_low", "ctx=trades_active"),
+        ("ctx=boll_narrow", "ctx=volatility_low", "ctx=trades_active"),
+    ),
+    "long_rebound_after_down_move_position_ok": (
+        ("ctx=macd_falling", "ctx=edge_extreme", "ctx=ret_short_drop"),
+        ("ctx=macd_falling", "ctx=macd_neg", "ctx=edge_extreme"),
+        ("ctx=boll_narrow", "ctx=edge_extreme", "ctx=pos_midlow"),
+    ),
+    "long_pup_ge_055_not_high": (
+        ("ctx=boll_lowmid", "ctx=trades_normal", "ctx=edge_extreme"),
+        ("ctx=ret30_drop", "ctx=trades_normal", "ctx=edge_extreme"),
+        ("ctx=trades_normal", "ctx=volatility_mid", "ctx=edge_extreme"),
+        ("ctx=ret30_flat", "regime=trend_down|low_vol|neutral"),
+        ("ctx=macd_falling", "session=late_us", "ctx=taker_buy"),
+        ("ctx=rsi_cold", "ctx=taker_flow_sell", "ctx=pos_midlow"),
+    ),
+    "long_signal_edge_up": (
+        ("ctx=ret30_drop", "ctx=trades_normal"),
+        ("ctx=trades_normal", "ctx=volatility_mid"),
+        ("ctx=edge_extreme", "ctx=ret30_drop", "ctx=trades_normal"),
+        ("ctx=edge_extreme", "ctx=trades_normal", "ctx=volatility_mid"),
+        ("ctx=ret30_drop", "ctx=taker_sell", "session=late_us"),
+    ),
+    "long_high_pup_macd_turn_not_high": (
+        ("ctx=rsi_cold", "ctx=quote_vol_quiet", "ctx=edge_large"),
+        ("ctx=rsi_cold", "ctx=vol_quiet", "ctx=edge_large"),
+        ("ctx=boll_lowmid", "ctx=quote_vol_quiet", "ctx=edge_large"),
+        ("ctx=boll_lowmid", "ctx=vol_quiet", "ctx=edge_large"),
+        ("ctx=rsi_cold", "ctx=trades_quiet", "ctx=edge_large"),
+    ),
+    "long_pup_ge_098_not_high": (
+        ("ctx=macd_falling", "ctx=trend_soft_down"),
+        ("ctx=macd_falling", "ctx=pup_high", "ctx=trend_soft_down"),
+        ("ctx=macd_falling", "ctx=up_dom", "ctx=trend_soft_down"),
     ),
 }
 

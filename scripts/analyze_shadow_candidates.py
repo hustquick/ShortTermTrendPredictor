@@ -1,7 +1,6 @@
 import argparse
 import itertools
 import math
-import re
 from pathlib import Path
 
 import pandas as pd
@@ -93,6 +92,39 @@ def _condition_summary(rows: pd.DataFrame, max_clauses: int, min_samples: int) -
     return pd.DataFrame(summaries)
 
 
+def _python_tuple(condition: str) -> str:
+    tokens = [token for token in condition.split(",") if token]
+    return "(" + ", ".join(repr(token) for token in tokens) + ",)"
+
+
+def _explicit_filter_recommendations(
+    conditions: pd.DataFrame,
+    min_samples: int,
+    min_win_rate: float,
+    min_wilson_lower: float,
+) -> pd.DataFrame:
+    if conditions.empty:
+        return pd.DataFrame()
+    candidates = conditions[
+        (conditions["samples"] >= min_samples)
+        & (conditions["win_rate"] >= min_win_rate)
+        & (conditions["wilson_lower"] >= min_wilson_lower)
+    ].copy()
+    if candidates.empty:
+        return candidates
+    candidates = candidates[
+        ~candidates["condition"].str.contains("direction=", regex=False)
+    ].copy()
+    if candidates.empty:
+        return candidates
+    candidates["filter_tuple"] = candidates["condition"].map(_python_tuple)
+    candidates = candidates.sort_values(
+        ["wilson_lower", "win_rate", "samples", "clauses"],
+        ascending=[False, False, False, True],
+    )
+    return candidates
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze adaptive rule shadow candidate outcomes.")
     parser.add_argument("paths", nargs="+", help="CSV files or glob patterns from adaptive_rule_multifold_backtest.")
@@ -102,6 +134,10 @@ def main():
     parser.add_argument("--max-clauses", type=int, default=3)
     parser.add_argument("--top", type=int, default=30)
     parser.add_argument("--output", default=None)
+    parser.add_argument("--explicit-filter-output", default=None)
+    parser.add_argument("--explicit-filter-min-samples", type=int, default=None)
+    parser.add_argument("--explicit-filter-min-win-rate", type=float, default=None)
+    parser.add_argument("--explicit-filter-min-wilson-lower", type=float, default=None)
     args = parser.parse_args()
 
     paths = []
@@ -132,7 +168,12 @@ def main():
     ]
     by_rule = by_rule.sort_values(["wilson_lower", "win_rate", "samples"], ascending=[False, False, False])
 
-    conditions = _condition_summary(shadows, args.max_clauses, args.min_samples)
+    explicit_filter_min_samples = args.explicit_filter_min_samples or args.min_samples
+    explicit_filter_min_win_rate = args.explicit_filter_min_win_rate or args.min_win_rate
+    explicit_filter_min_wilson_lower = args.explicit_filter_min_wilson_lower or args.min_wilson_lower
+    condition_min_samples = min(args.min_samples, explicit_filter_min_samples)
+
+    conditions = _condition_summary(shadows, args.max_clauses, condition_min_samples)
     if not conditions.empty:
         conditions = conditions.sort_values(
             ["wilson_lower", "win_rate", "samples"],
@@ -143,6 +184,12 @@ def main():
         & (conditions["win_rate"] >= args.min_win_rate)
         & (conditions["wilson_lower"] >= args.min_wilson_lower)
     ] if not conditions.empty else pd.DataFrame()
+    explicit_filters = _explicit_filter_recommendations(
+        conditions,
+        min_samples=explicit_filter_min_samples,
+        min_win_rate=explicit_filter_min_win_rate,
+        min_wilson_lower=explicit_filter_min_wilson_lower,
+    )
 
     print("[shadow] by rule:")
     print(by_rule.head(args.top).to_string(index=False))
@@ -156,12 +203,22 @@ def main():
         print("  none")
     else:
         print(accepted.head(args.top).to_string(index=False))
+    print("[shadow] explicit filter recommendations:")
+    if explicit_filters.empty:
+        print("  none")
+    else:
+        print(explicit_filters.head(args.top).to_string(index=False))
 
     if args.output:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
         conditions.to_csv(out, index=False)
         print(f"[shadow] conditions saved: {out}")
+    if args.explicit_filter_output:
+        out = Path(args.explicit_filter_output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        explicit_filters.to_csv(out, index=False)
+        print(f"[shadow] explicit filter recommendations saved: {out}")
 
 
 if __name__ == "__main__":
