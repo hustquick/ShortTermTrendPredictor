@@ -1337,6 +1337,12 @@ def run_realtime_strategies(
                             legacy_decision.confidence,
                             f"{decision.reason};{legacy_decision.reason}",
                         )
+                    elif legacy_decision.reason.startswith("legacy_coverage_blocked"):
+                        decision = StrategyDecision(
+                            decision.direction,
+                            decision.confidence,
+                            f"{decision.reason};{legacy_decision.reason}",
+                        )
                 strategy_decisions.append((strategy.name, decision))
                 print(
                     "[realtime_strategy] strategy decision: "
