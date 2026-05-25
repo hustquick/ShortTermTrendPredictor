@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 
 from config import (
@@ -36,6 +38,7 @@ from config import (
 from core.alpha_model import AlphaModelManager
 from core.data_feed import RealtimeDataFeed
 from core.feature_pipeline import FeaturePipeline
+from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS, LegacyAdaptiveCoverageGate
 from core.notifier import EnterpriseWechatNotifier
 from core.output_store import PredictionOutputStore
 from core.risk_gate import RiskGate
@@ -55,6 +58,7 @@ from strategies.rules import (
     RelaxedScenarioStrategy,
     ShortMomentumStrategy,
 )
+from strategies.base import StrategyDecision
 
 
 STRATEGY_MAP = {
@@ -298,6 +302,7 @@ def append_validated_signal(row: dict):
         "feature_signature",
         "learning_state",
         "learning_reason",
+        *FEATURE_COLUMNS,
     ]
     _append_csv_row(VALIDATED_STRATEGY_SIGNALS, columns, row)
 
@@ -372,6 +377,8 @@ def passes_production_quality_gate(
         return True, "production_quality_passed"
 
     if strategy_name == "adaptive_rule_switch":
+        if _extract_reason_value(reason, "legacy_coverage_gate") == "pass":
+            return True, "production_quality_passed;legacy_coverage_gate"
         mode = _extract_reason_value(reason, "adaptive_mode")
         samples = _extract_reason_float(reason, "rule_samples") or 0.0
         win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
@@ -921,6 +928,10 @@ def register_prediction_signal(
     p_down = float(prediction.get("down_signal_probability", 0.0))
     raw_direction = decision.direction if decision.direction in {"up", "down"} else ("up" if p_up >= p_down else "down")
     final_direction = decision.direction
+    feature_snapshot = {}
+    for column in FEATURE_COLUMNS:
+        value = features.get(column, "") if hasattr(features, "get") else ""
+        feature_snapshot[column] = "" if pd.isna(value) else value
 
     learning = learning_decision(
         VALIDATED_STRATEGY_SIGNALS,
@@ -935,6 +946,13 @@ def register_prediction_signal(
         learning.notify = True
         learning.state = "delegated_to_rule_switch"
         learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
+    if (
+        strategy_name == "adaptive_rule_switch"
+        and _extract_reason_value(decision.reason, "legacy_coverage_gate") == "pass"
+    ):
+        learning.notify = True
+        learning.state = "delegated_to_legacy_coverage"
+        learning.reason = f"learning_delegated_to_legacy_coverage;{learning.reason}"
     reason = f"{decision.reason};{learning.reason}"
     quality_ok, quality_reason = passes_production_quality_gate(
         strategy_name=strategy_name,
@@ -980,6 +998,7 @@ def register_prediction_signal(
         "feature_signature": feature_signature(features),
         "learning_state": learning.state,
         "learning_reason": learning.reason,
+        **feature_snapshot,
     }
 
     upsert_per_strategy_prediction(
@@ -1226,6 +1245,7 @@ def run_realtime_strategies(
     if alpha_model.load():
         print("[realtime_strategy] loaded saved model; startup retrain deferred until next interval")
     historical_rows = None
+    legacy_coverage_gate = LegacyAdaptiveCoverageGate()
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
     if live_chart_window is not None:
         live_chart_window.start()
@@ -1300,8 +1320,18 @@ def run_realtime_strategies(
                 )
 
             strategy_decisions = []
+            legacy_coverage_context = None
             for strategy in strategies:
                 decision = strategy.decide(feature_row, prediction)
+                if strategy.name == "adaptive_rule_switch":
+                    legacy_decision = legacy_coverage_gate.decide(feature_row, prediction)
+                    if legacy_decision.accepted:
+                        legacy_coverage_context = legacy_decision
+                        decision = StrategyDecision(
+                            legacy_decision.direction,
+                            legacy_decision.confidence,
+                            f"{decision.reason};{legacy_decision.reason}",
+                        )
                 strategy_decisions.append((strategy.name, decision))
                 print(
                     "[realtime_strategy] strategy decision: "
@@ -1312,7 +1342,29 @@ def run_realtime_strategies(
                     f"edge={prediction.get('direction_edge'):.4f}"
                 )
 
+            if legacy_coverage_context is not None:
+                peer_reason = (
+                    "peer_legacy_coverage_gate=pass;"
+                    f"peer_legacy_rule={legacy_coverage_context.rule};"
+                    f"peer_legacy_condition={legacy_coverage_context.condition}"
+                )
+                strategy_decisions = [
+                    (
+                        strategy_name,
+                        decision
+                        if strategy_name == "adaptive_rule_switch"
+                        else StrategyDecision(decision.direction, decision.confidence, f"{decision.reason};{peer_reason}"),
+                    )
+                    for strategy_name, decision in strategy_decisions
+                ]
+
             quality_context = _build_quality_context(strategy_decisions)
+            if legacy_coverage_context is not None:
+                quality_context["legacy_coverage"] = {
+                    "rule": legacy_coverage_context.rule,
+                    "condition": legacy_coverage_context.condition,
+                    "direction": legacy_coverage_context.direction,
+                }
             for strategy_name, decision in strategy_decisions:
                 register_prediction_signal(
                     strategy_name=strategy_name,
