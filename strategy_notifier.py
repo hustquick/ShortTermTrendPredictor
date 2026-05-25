@@ -95,14 +95,12 @@ def send_prediction_signal(
     lines = [
         f"{title_emoji}【BTC/USDT 高置信实时预测】",
         f"🧩 策略名称：{display_name}",
-        f"🆔 预测ID：{prediction_id}",
         f"🎯 最终方向：{_direction_text(direction)}",
         f"🔥 策略置信度：{confidence:.4f}",
         f"📌 该策略已验证有效信号历史准确率：{_fmt_rate(strategy_accuracy)}",
         f"🧾 该策略已验证有效信号样本：{_fmt_int(strategy_correct_count)}/{_fmt_int(strategy_total_count)}",
         f"💰 当前价格：{current_price:.2f}",
         f"⏰ 信号时间：{timestamp}",
-        f"📝 触发原因：{reason}",
     ]
 
     if horizon_minutes is not None:
@@ -117,8 +115,6 @@ def send_prediction_signal(
     if direction_edge is not None:
         lines.append(_edge_text(direction_edge))
 
-    lines.append("")
-    lines.append("🎯 目标：高置信方向准确率。")
     return post_wecom_markdown(lines)
 
 
@@ -158,15 +154,4 @@ def send_validation_signal(
         f"🧾 该策略已验证有效信号样本：{_fmt_int(strategy_correct_count)}/{_fmt_int(strategy_total_count)}",
     ]
 
-    lines.append("")
-    lines.append("🤖【原始双子模型输出】")
-    if up_signal_probability is not None:
-        lines.append(f"📈 上涨子模型 up_model：{up_signal_probability:.4f}")
-    if down_signal_probability is not None:
-        lines.append(f"📉 下跌子模型 down_model：{down_signal_probability:.4f}")
-    if direction_edge is not None:
-        lines.append(_edge_text(direction_edge))
-
-    lines.append("")
-    lines.append("🎯 目标：高置信方向准确率。")
     return post_wecom_markdown(lines)
