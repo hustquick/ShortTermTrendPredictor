@@ -246,7 +246,16 @@ def build_stream(
             train_df = df.iloc[train_start:idx].copy()
             if len(train_df) < BACKTEST_MIN_TRAIN_SAMPLES:
                 continue
+            train_started = time.time()
+            print(
+                "[legacy_stream] model update start: "
+                f"step={step_no}/{total}, point_time={point_time}, train_rows={len(train_df)}"
+            )
             model = train_validation_model(train_df)
+            print(
+                "[legacy_stream] model update done: "
+                f"step={step_no}/{total}, elapsed={time.time() - train_started:.1f}s"
+            )
             next_model_update_idx = idx + model_update_minutes
             model_trained_at_time = point_time
 
