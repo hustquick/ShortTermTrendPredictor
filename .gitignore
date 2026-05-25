@@ -6,5 +6,6 @@ __pycache__/
 venv/
 env/
 
-data/
+data/*
+!data/rolling_coverage_365d_step1_update10080_train30_cover7_min5_strict_with_provenance.csv
 models/
