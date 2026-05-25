@@ -379,22 +379,7 @@ def passes_production_quality_gate(
     if strategy_name == "adaptive_rule_switch":
         if _extract_reason_value(reason, "legacy_coverage_gate") == "pass":
             return True, "production_quality_passed;legacy_coverage_gate"
-        mode = _extract_reason_value(reason, "adaptive_mode")
-        samples = _extract_reason_float(reason, "rule_samples") or 0.0
-        win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
-        state_ok = _extract_reason_value(reason, "state_ok")
-        volume_shock = _extract_reason_value(reason, "volume_shock")
-        if mode != "active":
-            return False, "production_blocked;adaptive_rule_switch_exploring"
-        if samples < 5:
-            return False, "production_blocked;adaptive_rule_switch_samples_below_5"
-        if win_rate < 0.70:
-            return False, "production_blocked;adaptive_rule_switch_win_rate_below_0.70"
-        if state_ok != "True":
-            if volume_shock == "True":
-                return False, "production_blocked;adaptive_rule_switch_volume_shock"
-            return False, "production_blocked;adaptive_rule_switch_state_blocked"
-        return True, "production_quality_passed"
+        return False, "production_blocked;adaptive_rule_switch_requires_rolling_coverage"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
         if raw_direction == "down" and not KRONOS_NOTIFY_ALLOW_DOWN:
