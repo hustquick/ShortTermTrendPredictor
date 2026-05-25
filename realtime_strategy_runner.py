@@ -1246,6 +1246,11 @@ def run_realtime_strategies(
         print("[realtime_strategy] loaded saved model; startup retrain deferred until next interval")
     historical_rows = None
     legacy_coverage_gate = LegacyAdaptiveCoverageGate()
+    if "adaptive_rule_switch" in names and not legacy_coverage_gate.report_path.exists():
+        raise FileNotFoundError(
+            "legacy coverage report is required for adaptive_rule_switch official signals: "
+            f"{legacy_coverage_gate.report_path}"
+        )
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
     if live_chart_window is not None:
         live_chart_window.start()
