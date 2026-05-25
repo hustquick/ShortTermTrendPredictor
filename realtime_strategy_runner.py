@@ -384,33 +384,7 @@ def passes_production_quality_gate(
     if strategy_name == "adaptive_rule_switch":
         if _extract_reason_value(reason, "legacy_coverage_gate") == "pass":
             return True, "production_quality_passed;legacy_coverage_gate"
-        mode = _extract_reason_value(reason, "adaptive_mode")
-        scope = _extract_reason_value(reason, "rule_scope")
-        samples = _extract_reason_float(reason, "rule_samples") or 0.0
-        win_rate = _extract_reason_float(reason, "rule_win_rate") or 0.0
-        wilson_lower = _extract_reason_float(reason, "rule_wilson_lower") or 0.0
-        recent_loss_streak = _extract_reason_float(reason, "rule_recent_loss_streak") or 0.0
-        context_veto = _extract_reason_value(reason, "context_veto")
-        state_ok = _extract_reason_value(reason, "state_ok")
-        volume_gate_enabled = _extract_reason_value(reason, "volume_gate_enabled")
-        volume_shock = _extract_reason_value(reason, "volume_shock")
-        if mode != "active":
-            return False, "production_blocked;adaptive_rule_switch_exploring"
-        if context_veto == "True":
-            return False, "production_blocked;adaptive_rule_switch_context_veto"
-        if scope == "online_miner" and wilson_lower < ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER:
-            return False, "production_blocked;adaptive_rule_miner_wilson_below_threshold"
-        if recent_loss_streak > ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK:
-            return False, "production_blocked;adaptive_rule_switch_recent_loss_streak"
-        if samples < 5:
-            return False, "production_blocked;adaptive_rule_switch_samples_below_5"
-        if win_rate < 0.70:
-            return False, "production_blocked;adaptive_rule_switch_win_rate_below_0.70"
-        if state_ok != "True":
-            if volume_gate_enabled == "True" and volume_shock == "True":
-                return False, "production_blocked;adaptive_rule_switch_volume_shock"
-            return False, "production_blocked;adaptive_rule_switch_state_blocked"
-        return True, "production_quality_passed"
+        return False, "production_blocked;adaptive_rule_switch_requires_rolling_coverage"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
         if raw_direction == "down" and not KRONOS_NOTIFY_ALLOW_DOWN:
