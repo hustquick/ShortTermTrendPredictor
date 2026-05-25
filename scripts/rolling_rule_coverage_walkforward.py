@@ -22,6 +22,8 @@ def run_rolling_coverage(
     min_win_rate: float,
     min_wilson_lower: float,
     beam_size: int,
+    source_strategy: str,
+    source_layer: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     start = df["timestamp_dt"].min() + pd.Timedelta(days=train_days)
     end = df["timestamp_dt"].max()
@@ -52,6 +54,8 @@ def run_rolling_coverage(
         if selected is None:
             rows.append({
                 "window": window_no,
+                "source_strategy": source_strategy,
+                "source_layer": source_layer,
                 "train_start": train_start,
                 "train_end": current,
                 "cover_start": current,
@@ -74,10 +78,17 @@ def run_rolling_coverage(
         if cover_count:
             cover_signals["rolling_window"] = window_no
             cover_signals["rolling_condition"] = selected["condition"]
+            cover_signals["source_strategy"] = source_strategy
+            cover_signals["source_layer"] = source_layer
+            cover_signals["source_rule"] = cover_signals.get("rule", "")
+            cover_signals["source_condition"] = selected["condition"]
             signal_frames.append(cover_signals)
 
         rows.append({
             "window": window_no,
+            "source_strategy": source_strategy,
+            "source_layer": source_layer,
+            "source_condition": selected["condition"],
             **selected,
             "train_start": train_start,
             "train_end": current,
@@ -111,6 +122,8 @@ def main() -> None:
     parser.add_argument("--min-wilson-lower", type=float, default=0.68)
     parser.add_argument("--beam-size", type=int, default=80)
     parser.add_argument("--require-step-minutes", type=int, default=None)
+    parser.add_argument("--source-strategy", default="adaptive_rule_switch")
+    parser.add_argument("--source-layer", default="legacy_adaptive_candidate_stream")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
@@ -136,6 +149,8 @@ def main() -> None:
         min_win_rate=args.min_win_rate,
         min_wilson_lower=args.min_wilson_lower,
         beam_size=args.beam_size,
+        source_strategy=args.source_strategy,
+        source_layer=args.source_layer,
     )
     print(report.to_string(index=False) if not report.empty else "no windows")
     total_signals = int(len(signals))
