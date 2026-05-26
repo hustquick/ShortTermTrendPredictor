@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 
 from config import DATA_DIR
+from core.legacy_candidate_stream import LEGACY_CANDIDATE_STREAM_CSV, LEGACY_ONLINE_CANDIDATE_STREAM_CSV
 from data_download import ms_to_beijing_time
 from scripts.online_signal_filter_walkforward import _load_rows, _search_best_condition
 from strategies.base import feature_value
@@ -14,7 +15,7 @@ DEFAULT_COVERAGE_REPORT = (
     DATA_DIR / "rolling_coverage_365d_step1_update10080_train30_cover7_min5_strict_with_provenance.csv"
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
-DEFAULT_CANDIDATE_STREAM = DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080.csv"
+DEFAULT_CANDIDATE_STREAM = LEGACY_CANDIDATE_STREAM_CSV
 FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -149,11 +150,17 @@ class LegacyAdaptiveCoverageGate:
         return ""
 
     def _candidate_training_rows(self) -> pd.DataFrame:
-        if self.candidate_stream_path.exists():
+        stream_paths = [LEGACY_ONLINE_CANDIDATE_STREAM_CSV, self.candidate_stream_path]
+        frames = []
+        for path in stream_paths:
+            if not path.exists():
+                continue
             try:
-                return _load_rows(self.candidate_stream_path)
+                frames.append(_load_rows(path))
             except Exception:
-                pass
+                continue
+        if frames:
+            return pd.concat(frames, ignore_index=True).sort_values("timestamp_dt").reset_index(drop=True)
         if not self.validated_path.exists():
             return pd.DataFrame()
         try:

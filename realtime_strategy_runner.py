@@ -38,6 +38,7 @@ from config import (
 from core.alpha_model import AlphaModelManager
 from core.data_feed import RealtimeDataFeed
 from core.feature_pipeline import FeaturePipeline
+from core.legacy_candidate_stream import LegacyCandidateStreamGenerator
 from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS, LegacyAdaptiveCoverageGate
 from core.notifier import EnterpriseWechatNotifier
 from core.output_store import PredictionOutputStore
@@ -123,6 +124,7 @@ OFFICIAL_SIGNAL_STRATEGIES = set(OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST)
 OUTPUT_STORE = PredictionOutputStore()
 RISK_GATE = RiskGate()
 NOTIFIER = EnterpriseWechatNotifier()
+LEGACY_CANDIDATE_STREAM = LegacyCandidateStreamGenerator()
 
 
 def parse_strategy_names(strategy_names: str):
@@ -773,6 +775,13 @@ def validate_due_signals(df, now_ms: int):
             is_correct,
         )
 
+        if row["strategy"] == "adaptive_rule_switch":
+            LEGACY_CANDIDATE_STREAM.append_validated(
+                row.get("legacy_candidate_stream_row"),
+                actual_direction,
+                validation_price,
+            )
+
         if final_direction in {"up", "down"}:
             validation_row = {
                 "prediction_id": row["prediction_id"],
@@ -984,6 +993,16 @@ def register_prediction_signal(
         "feature_signature": feature_signature(features),
         "learning_state": learning.state,
         "learning_reason": learning.reason,
+        "legacy_candidate_stream_row": (
+            LEGACY_CANDIDATE_STREAM.pending_row(
+                features=features,
+                prediction=prediction,
+                current_price=float(current_price),
+                signal_time=signal_time,
+            )
+            if strategy_name == "adaptive_rule_switch"
+            else None
+        ),
         **feature_snapshot,
     }
 
