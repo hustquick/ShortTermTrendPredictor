@@ -1233,7 +1233,8 @@ def run_realtime_strategies(
     kronos_adapter = KronosAdapter() if use_kronos else None
     data_feed = RealtimeDataFeed(minutes=train_minutes, update_cache=update_cache)
     feature_pipeline = FeaturePipeline()
-    alpha_model = AlphaModelManager(retrain_interval_seconds=30 * 60)
+    # Match the legacy candidate stream used by the long walk-forward coverage backtest.
+    alpha_model = AlphaModelManager(retrain_interval_seconds=10080 * 60)
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
@@ -1248,7 +1249,8 @@ def run_realtime_strategies(
     rebuild_latest_predictions_from_log()
 
     if alpha_model.load():
-        print("[realtime_strategy] loaded saved model; startup retrain deferred until next interval")
+        alpha_model.last_train_time = None
+        print("[realtime_strategy] loaded saved model; startup retrain required for legacy coverage parity")
     historical_rows = None
     legacy_coverage_gate = LegacyAdaptiveCoverageGate()
     if "adaptive_rule_switch" in names and not legacy_coverage_gate.report_path.exists():
@@ -1259,6 +1261,7 @@ def run_realtime_strategies(
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
     if live_chart_window is not None:
         live_chart_window.start()
+    last_processed_signal_timestamp = None
 
     while True:
         try:
@@ -1280,7 +1283,9 @@ def run_realtime_strategies(
                 alpha_model.ensure_trained(df)
                 print("[realtime_strategy] model updated")
                 historical_rows = None
-            elif (datetime.now() - alpha_model.last_train_time).total_seconds() >= 30 * 60:
+            elif (
+                datetime.now() - alpha_model.last_train_time
+            ).total_seconds() >= alpha_model.retrain_interval_seconds:
                 print("[realtime_strategy] training model")
                 alpha_model.ensure_trained(df)
                 print("[realtime_strategy] model updated")
@@ -1298,94 +1303,114 @@ def run_realtime_strategies(
                 historical_rows = _refresh_historical_match_rows(df, feature_df, alpha_model.model)
                 _update_historical_strategy_context(strategies, historical_rows)
 
-            latest = feature_df.iloc[[-1]].copy()
-            latest_features = latest[alpha_model.feature_cols]
-            feature_row = latest.iloc[0]
-            prediction = alpha_model.predict_one(latest_features)
+            if last_processed_signal_timestamp is None:
+                rows_to_process = feature_df.tail(1)
+            else:
+                rows_to_process = feature_df[
+                    pd.to_numeric(feature_df["timestamp"], errors="coerce") > last_processed_signal_timestamp
+                ].tail(20)
+            if rows_to_process.empty:
+                print("[realtime_strategy] no new feature rows")
+                if once:
+                    return
+                time.sleep(REALTIME_INTERVAL_SECONDS)
+                continue
 
-            current_price = float(df.iloc[-1]["close"])
-            signal_timestamp = int(df.iloc[-1]["timestamp"])
-            signal_time = ms_to_beijing_time(signal_timestamp)
+            close_by_timestamp = df.set_index("timestamp")["close"]
+            for _, feature_row in rows_to_process.iterrows():
+                signal_timestamp = int(feature_row["timestamp"])
+                latest = feature_row.to_frame().T
+                latest_features = latest[alpha_model.feature_cols]
+                prediction = alpha_model.predict_one(latest_features)
 
-            print(
-                "[realtime_strategy] dual-model output: "
-                f"time={signal_time}, price={current_price:.2f}, "
-                f"up_model={prediction.get('up_signal_probability'):.4f}, "
-                f"down_model={prediction.get('down_signal_probability'):.4f}, "
-                f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
-            )
+                current_price = float(close_by_timestamp.loc[signal_timestamp])
+                signal_time = ms_to_beijing_time(signal_timestamp)
 
-            if kronos_adapter is not None:
-                should_run_kronos, kronos_skip_reason = _should_run_kronos(prediction)
-                if should_run_kronos:
-                    kronos_result = kronos_adapter.forecast_direction(df)
-                else:
-                    kronos_result = _skipped_kronos_result(kronos_skip_reason)
-                _update_kronos_strategy_context(strategies, kronos_result)
                 print(
-                    "[realtime_strategy] kronos output: "
-                    f"available={kronos_result.available}, direction={kronos_result.direction}, "
-                    f"confidence={kronos_result.confidence:.4f}, "
-                    f"forecast_close={kronos_result.forecast_close}, reason={kronos_result.reason}"
-                )
-
-            strategy_decisions = []
-            legacy_coverage_context = None
-            for strategy in strategies:
-                decision = strategy.decide(feature_row, prediction)
-                if strategy.name == "adaptive_rule_switch":
-                    legacy_decision = legacy_coverage_gate.decide(feature_row, prediction)
-                    if legacy_decision.accepted:
-                        legacy_coverage_context = legacy_decision
-                        decision = StrategyDecision(
-                            legacy_decision.direction,
-                            legacy_decision.confidence,
-                            f"{decision.reason};{legacy_decision.reason}",
-                        )
-                strategy_decisions.append((strategy.name, decision))
-                print(
-                    "[realtime_strategy] strategy decision: "
-                    f"strategy={strategy.name}, direction={decision.direction}, "
-                    f"confidence={decision.confidence:.4f}, reason={decision.reason}, "
+                    "[realtime_strategy] dual-model output: "
+                    f"time={signal_time}, price={current_price:.2f}, "
                     f"up_model={prediction.get('up_signal_probability'):.4f}, "
                     f"down_model={prediction.get('down_signal_probability'):.4f}, "
-                    f"edge={prediction.get('direction_edge'):.4f}"
+                    f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
                 )
 
-            if legacy_coverage_context is not None:
-                peer_reason = (
-                    "peer_legacy_coverage_gate=pass;"
-                    f"peer_legacy_rule={legacy_coverage_context.rule};"
-                    f"peer_legacy_condition={legacy_coverage_context.condition}"
-                )
-                strategy_decisions = [
-                    (
-                        strategy_name,
-                        decision
-                        if strategy_name == "adaptive_rule_switch"
-                        else StrategyDecision(decision.direction, decision.confidence, f"{decision.reason};{peer_reason}"),
+                if kronos_adapter is not None:
+                    should_run_kronos, kronos_skip_reason = _should_run_kronos(prediction)
+                    if should_run_kronos:
+                        kronos_df = df[df["timestamp"] <= signal_timestamp].copy()
+                        kronos_result = kronos_adapter.forecast_direction(kronos_df)
+                    else:
+                        kronos_result = _skipped_kronos_result(kronos_skip_reason)
+                    _update_kronos_strategy_context(strategies, kronos_result)
+                    print(
+                        "[realtime_strategy] kronos output: "
+                        f"available={kronos_result.available}, direction={kronos_result.direction}, "
+                        f"confidence={kronos_result.confidence:.4f}, "
+                        f"forecast_close={kronos_result.forecast_close}, reason={kronos_result.reason}"
                     )
-                    for strategy_name, decision in strategy_decisions
-                ]
 
-            quality_context = _build_quality_context(strategy_decisions)
-            if legacy_coverage_context is not None:
-                quality_context["legacy_coverage"] = {
-                    "rule": legacy_coverage_context.rule,
-                    "condition": legacy_coverage_context.condition,
-                    "direction": legacy_coverage_context.direction,
-                }
-            for strategy_name, decision in strategy_decisions:
-                register_prediction_signal(
-                    strategy_name=strategy_name,
-                    decision=decision,
-                    prediction=prediction,
-                    current_price=current_price,
-                    signal_timestamp=signal_timestamp,
-                    signal_time=signal_time,
-                    features=feature_row,
-                    quality_context=quality_context,
-                )
+                strategy_decisions = []
+                legacy_coverage_context = None
+                for strategy in strategies:
+                    decision = strategy.decide(feature_row, prediction)
+                    if strategy.name == "adaptive_rule_switch":
+                        legacy_decision = legacy_coverage_gate.decide(feature_row, prediction)
+                        if legacy_decision.accepted:
+                            legacy_coverage_context = legacy_decision
+                            decision = StrategyDecision(
+                                legacy_decision.direction,
+                                legacy_decision.confidence,
+                                f"{decision.reason};{legacy_decision.reason}",
+                            )
+                    strategy_decisions.append((strategy.name, decision))
+                    print(
+                        "[realtime_strategy] strategy decision: "
+                        f"strategy={strategy.name}, direction={decision.direction}, "
+                        f"confidence={decision.confidence:.4f}, reason={decision.reason}, "
+                        f"up_model={prediction.get('up_signal_probability'):.4f}, "
+                        f"down_model={prediction.get('down_signal_probability'):.4f}, "
+                        f"edge={prediction.get('direction_edge'):.4f}"
+                    )
+
+                if legacy_coverage_context is not None:
+                    peer_reason = (
+                        "peer_legacy_coverage_gate=pass;"
+                        f"peer_legacy_rule={legacy_coverage_context.rule};"
+                        f"peer_legacy_condition={legacy_coverage_context.condition}"
+                    )
+                    strategy_decisions = [
+                        (
+                            strategy_name,
+                            decision
+                            if strategy_name == "adaptive_rule_switch"
+                            else StrategyDecision(
+                                decision.direction,
+                                decision.confidence,
+                                f"{decision.reason};{peer_reason}",
+                            ),
+                        )
+                        for strategy_name, decision in strategy_decisions
+                    ]
+
+                quality_context = _build_quality_context(strategy_decisions)
+                if legacy_coverage_context is not None:
+                    quality_context["legacy_coverage"] = {
+                        "rule": legacy_coverage_context.rule,
+                        "condition": legacy_coverage_context.condition,
+                        "direction": legacy_coverage_context.direction,
+                    }
+                for strategy_name, decision in strategy_decisions:
+                    register_prediction_signal(
+                        strategy_name=strategy_name,
+                        decision=decision,
+                        prediction=prediction,
+                        current_price=current_price,
+                        signal_timestamp=signal_timestamp,
+                        signal_time=signal_time,
+                        features=feature_row,
+                        quality_context=quality_context,
+                    )
+                last_processed_signal_timestamp = signal_timestamp
 
             render_strategy_charts(names)
             if live_chart_window is not None:
