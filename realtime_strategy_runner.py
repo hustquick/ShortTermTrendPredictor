@@ -1313,7 +1313,7 @@ def run_realtime_strategies(
                 _update_historical_strategy_context(strategies, historical_rows)
 
             if last_processed_signal_timestamp is None:
-                rows_to_process = feature_df.tail(1)
+                rows_to_process = feature_df.tail(20)
             else:
                 rows_to_process = feature_df[
                     pd.to_numeric(feature_df["timestamp"], errors="coerce") > last_processed_signal_timestamp
