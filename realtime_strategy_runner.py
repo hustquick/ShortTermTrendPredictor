@@ -1109,6 +1109,31 @@ def register_prediction_signal(
         )
 
 
+def _latest_recorded_signal_timestamp() -> int | None:
+    latest = None
+    paths = [STRATEGY_PREDICTIONS_CSV, ALL_PREDICTIONS_CSV]
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path, usecols=["strategy", "prediction_id"])
+        except Exception:
+            continue
+        if "strategy" in df:
+            df = df[df["strategy"].eq("adaptive_rule_switch")]
+        if df.empty or "prediction_id" not in df:
+            continue
+        timestamps = pd.to_numeric(
+            df["prediction_id"].astype(str).str.extract(r"-(\d+)$", expand=False),
+            errors="coerce",
+        ).dropna()
+        if timestamps.empty:
+            continue
+        value = int(timestamps.max())
+        latest = value if latest is None else max(latest, value)
+    return latest
+
+
 def _refresh_historical_match_rows(df, feature_df, model):
     historical_feature_df = feature_df.iloc[:-PREDICT_HORIZON_MINUTES].copy()
     source_end_ms = int(df.iloc[-1]["timestamp"]) if not df.empty else 0
@@ -1261,7 +1286,12 @@ def run_realtime_strategies(
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
     if live_chart_window is not None:
         live_chart_window.start()
-    last_processed_signal_timestamp = None
+    last_processed_signal_timestamp = _latest_recorded_signal_timestamp()
+    if last_processed_signal_timestamp is not None:
+        print(
+            "[realtime_strategy] resume from recorded signal timestamp: "
+            f"{ms_to_beijing_time(last_processed_signal_timestamp)}"
+        )
 
     while True:
         try:
@@ -1304,7 +1334,7 @@ def run_realtime_strategies(
                 _update_historical_strategy_context(strategies, historical_rows)
 
             if last_processed_signal_timestamp is None:
-                rows_to_process = feature_df.tail(20)
+                rows_to_process = feature_df.tail(1)
             else:
                 rows_to_process = feature_df[
                     pd.to_numeric(feature_df["timestamp"], errors="coerce") > last_processed_signal_timestamp
