@@ -1,3 +1,4 @@
+import json
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from strategies.base import feature_value
 
 LEGACY_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080.csv"
 LEGACY_ONLINE_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_online_candidate_stream.csv"
+LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV = DATA_DIR / "legacy_online_candidate_rule_outcomes.csv"
 LEGACY_CANDIDATE_FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -44,6 +46,13 @@ LEGACY_CANDIDATE_STREAM_COLUMNS = [
     "prior_rule_win",
     "prior_rule_samples",
     "state_ok",
+]
+LEGACY_CANDIDATE_RULE_OUTCOME_COLUMNS = [
+    "timestamp",
+    "rule",
+    "direction",
+    "actual_direction",
+    "correct",
 ]
 
 
@@ -118,9 +127,15 @@ def _active_candidate(candidates: list[dict], records_by_rule: dict[str, deque[b
 
 
 class LegacyCandidateStreamGenerator:
-    def __init__(self, stream_path: Path | None = None, history_path: Path | None = None):
+    def __init__(
+        self,
+        stream_path: Path | None = None,
+        history_path: Path | None = None,
+        rule_outcome_path: Path | None = None,
+    ):
         self.stream_path = stream_path or LEGACY_ONLINE_CANDIDATE_STREAM_CSV
         self.history_path = history_path or LEGACY_CANDIDATE_STREAM_CSV
+        self.rule_outcome_path = rule_outcome_path or LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV
 
     def _records_by_rule(self) -> dict[str, deque[bool]]:
         records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=10))
@@ -131,6 +146,11 @@ class LegacyCandidateStreamGenerator:
                     frames.append(pd.read_csv(path, usecols=["timestamp", "rule", "direction", "actual_direction"]))
                 except Exception:
                     continue
+        if self.rule_outcome_path.exists():
+            try:
+                frames.append(pd.read_csv(self.rule_outcome_path))
+            except Exception:
+                pass
         if not frames:
             return records_by_rule
         rows = pd.concat(frames, ignore_index=True)
@@ -155,28 +175,33 @@ class LegacyCandidateStreamGenerator:
         if not candidates:
             return None
         selected = _active_candidate(candidates, self._records_by_rule())
-        if selected is None:
-            return None
-        state_ok = legacy_state_ok(features, prediction, selected["direction"])
+        state_ok = legacy_state_ok(features, prediction, selected["direction"]) if selected is not None else False
         row = {
             "timestamp": signal_time,
             "current_price": float(current_price),
             "future_price": "",
             "future_return": "",
-            "predicted_direction": selected["direction"] if state_ok else "no_trade",
+            "predicted_direction": selected["direction"] if selected is not None and state_ok else "no_trade",
             "actual_direction": "",
             "up_probability": float(prediction.get("up_probability", 0.5)),
-            "confidence": selected["confidence"],
+            "confidence": selected["confidence"] if selected is not None else "",
             "is_valid_signal": bool(state_ok),
             "is_correct": "",
             "model_trained_at": model_trained_at,
             "dt": signal_time,
-            "rule": selected["name"],
-            "direction": selected["direction"],
+            "rule": selected["name"] if selected is not None else "",
+            "direction": selected["direction"] if selected is not None else "",
             "correct": "",
-            "prior_rule_win": selected["prior_rule_win"],
-            "prior_rule_samples": selected["prior_rule_samples"],
+            "prior_rule_win": selected["prior_rule_win"] if selected is not None else "",
+            "prior_rule_samples": selected["prior_rule_samples"] if selected is not None else "",
             "state_ok": bool(state_ok),
+            "all_candidates": json.dumps(
+                [
+                    {"rule": item["name"], "direction": item["direction"]}
+                    for item in candidates
+                ],
+                separators=(",", ":"),
+            ),
         }
         for column in LEGACY_CANDIDATE_FEATURE_COLUMNS:
             value = features.get(column, "") if hasattr(features, "get") else ""
@@ -187,6 +212,9 @@ class LegacyCandidateStreamGenerator:
         if not pending_row:
             return
         row = dict(pending_row)
+        self._append_rule_outcomes(row, actual_direction)
+        if not row.get("rule") or str(row.get("direction", "")) not in {"up", "down"}:
+            return
         current_price = float(row["current_price"])
         direction = str(row.get("direction", ""))
         state_ok = str(row.get("state_ok", "")).lower() == "true"
@@ -205,3 +233,36 @@ class LegacyCandidateStreamGenerator:
             if not exists:
                 writer.writeheader()
             writer.writerow({column: row.get(column, "") for column in LEGACY_CANDIDATE_STREAM_COLUMNS})
+
+    def _append_rule_outcomes(self, row: dict, actual_direction: str) -> None:
+        raw_candidates = row.get("all_candidates", "")
+        if not raw_candidates:
+            return
+        try:
+            candidates = json.loads(raw_candidates)
+        except Exception:
+            return
+        if not isinstance(candidates, list):
+            return
+        self.rule_outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        exists = self.rule_outcome_path.exists()
+        with self.rule_outcome_path.open("a", encoding="utf-8", newline="") as f:
+            import csv
+
+            writer = csv.DictWriter(f, fieldnames=LEGACY_CANDIDATE_RULE_OUTCOME_COLUMNS)
+            if not exists:
+                writer.writeheader()
+            for candidate in candidates:
+                rule = str(candidate.get("rule", ""))
+                direction = str(candidate.get("direction", ""))
+                if not rule or direction not in {"up", "down"}:
+                    continue
+                writer.writerow(
+                    {
+                        "timestamp": row.get("timestamp", ""),
+                        "rule": rule,
+                        "direction": direction,
+                        "actual_direction": actual_direction,
+                        "correct": direction == actual_direction,
+                    }
+                )
