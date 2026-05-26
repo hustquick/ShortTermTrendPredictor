@@ -5,7 +5,7 @@ import pandas as pd
 
 from config import DATA_DIR
 from data_download import ms_to_beijing_time
-from scripts.online_signal_filter_walkforward import _search_best_condition
+from scripts.online_signal_filter_walkforward import _load_rows, _search_best_condition
 from strategies.base import feature_value
 from strategies.rules import _adaptive_feature_context
 
@@ -14,6 +14,7 @@ DEFAULT_COVERAGE_REPORT = (
     DATA_DIR / "rolling_coverage_365d_step1_update10080_train30_cover7_min5_strict_with_provenance.csv"
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
+DEFAULT_CANDIDATE_STREAM = DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080.csv"
 FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -46,6 +47,7 @@ class LegacyAdaptiveCoverageGate:
         self,
         report_path: Path | None = None,
         validated_path: Path | None = None,
+        candidate_stream_path: Path | None = None,
         enabled: bool = True,
         online_rediscovery_enabled: bool = True,
         rediscover_interval_minutes: int = 30,
@@ -61,6 +63,7 @@ class LegacyAdaptiveCoverageGate:
     ):
         self.report_path = report_path or DEFAULT_COVERAGE_REPORT
         self.validated_path = validated_path or DEFAULT_VALIDATED_SIGNALS
+        self.candidate_stream_path = candidate_stream_path or DEFAULT_CANDIDATE_STREAM
         self.enabled = enabled
         self.online_rediscovery_enabled = online_rediscovery_enabled
         self.rediscover_interval_ms = int(rediscover_interval_minutes) * 60_000
@@ -145,35 +148,26 @@ class LegacyAdaptiveCoverageGate:
                 return part[len(prefix):]
         return ""
 
-    def _maybe_rediscover(self, now_ms: int) -> None:
-        if not self.online_rediscovery_enabled:
-            return
-        if now_ms <= 0:
-            return
-        if self._active_condition_is_current(self._online_conditions[0], now_ms) if self._online_conditions else False:
-            return
-        if self._last_rediscover_ms and now_ms - self._last_rediscover_ms < self.rediscover_interval_ms:
-            return
-        self._last_rediscover_ms = now_ms
+    def _candidate_training_rows(self) -> pd.DataFrame:
+        if self.candidate_stream_path.exists():
+            try:
+                return _load_rows(self.candidate_stream_path)
+            except Exception:
+                pass
         if not self.validated_path.exists():
-            return
+            return pd.DataFrame()
         try:
             df = pd.read_csv(self.validated_path)
         except Exception:
-            return
+            return pd.DataFrame()
         required = {"strategy", "predicted_direction", "correct", "signal_time", "reason", *FEATURE_COLUMNS}
         if df.empty or not required.issubset(df.columns):
-            return
+            return pd.DataFrame()
         df = df[df["strategy"].eq("adaptive_rule_switch")].copy()
         if df.empty:
-            return
+            return pd.DataFrame()
         df["timestamp_dt"] = pd.to_datetime(df["signal_time"], errors="coerce")
         df = df[df["timestamp_dt"].notna()].copy()
-        now_dt = self._now_dt(now_ms)
-        cutoff = now_dt - pd.Timedelta(days=self.train_days)
-        df = df[(df["timestamp_dt"] >= cutoff) & (df["timestamp_dt"] < now_dt)].copy()
-        if len(df) < self.min_samples:
-            return
         reason = df["reason"].fillna("").astype(str)
         df["timestamp"] = df["signal_time"]
         df["direction"] = df["predicted_direction"]
@@ -189,6 +183,26 @@ class LegacyAdaptiveCoverageGate:
         df["session"] = df["timestamp_dt"].map(self._session_from_dt)
         for column in FEATURE_COLUMNS:
             df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def _maybe_rediscover(self, now_ms: int) -> None:
+        if not self.online_rediscovery_enabled:
+            return
+        if now_ms <= 0:
+            return
+        if self._active_condition_is_current(self._online_conditions[0], now_ms) if self._online_conditions else False:
+            return
+        if self._last_rediscover_ms and now_ms - self._last_rediscover_ms < self.rediscover_interval_ms:
+            return
+        self._last_rediscover_ms = now_ms
+        df = self._candidate_training_rows()
+        if df.empty:
+            return
+        now_dt = self._now_dt(now_ms)
+        cutoff = now_dt - pd.Timedelta(days=self.train_days)
+        df = df[(df["timestamp_dt"] >= cutoff) & (df["timestamp_dt"] < now_dt)].copy()
+        if len(df) < self.min_samples:
+            return
         selected = _search_best_condition(
             df,
             max_clauses=self.max_clauses,

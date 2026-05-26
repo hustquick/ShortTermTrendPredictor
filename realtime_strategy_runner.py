@@ -800,6 +800,7 @@ def validate_due_signals(df, now_ms: int):
                 "feature_signature": row.get("feature_signature"),
                 "learning_state": row.get("learning_state"),
                 "learning_reason": row.get("learning_reason"),
+                **{column: row.get(column, "") for column in FEATURE_COLUMNS},
             }
             append_validated_signal(validation_row)
             build_learning_state(VALIDATED_STRATEGY_SIGNALS)
