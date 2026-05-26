@@ -4,7 +4,13 @@ from pathlib import Path
 import pandas as pd
 
 from config import DATA_DIR
-from core.legacy_candidate_stream import LEGACY_CANDIDATE_STREAM_CSV, LEGACY_ONLINE_CANDIDATE_STREAM_CSV
+from core.legacy_candidate_stream import (
+    LEGACY_CANDIDATE_STREAM_CSV,
+    LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
+    LegacyCandidateStreamGenerator,
+    _active_candidate as _legacy_active_candidate,
+    legacy_candidates as _legacy_stream_candidates,
+)
 from data_download import ms_to_beijing_time
 from scripts.online_signal_filter_walkforward import _load_rows, _search_best_condition
 from strategies.base import feature_value
@@ -81,6 +87,7 @@ class LegacyAdaptiveCoverageGate:
         self._offline_conditions: list[dict] = []
         self._online_conditions: list[dict] = []
         self._last_rediscover_ms = 0
+        self._candidate_stream = LegacyCandidateStreamGenerator()
 
     def _load(self) -> None:
         if self._loaded:
@@ -355,7 +362,16 @@ class LegacyAdaptiveCoverageGate:
         if not conditions:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_active_window")
 
-        for candidate in self._legacy_candidates(features, prediction):
+        stream_candidates = _legacy_stream_candidates(features, prediction)
+        selected = _legacy_active_candidate(stream_candidates, self._candidate_stream._records_by_rule())
+        if selected is None:
+            return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_selected_candidate")
+        candidate = {
+            "rule": selected["name"],
+            "direction": selected["direction"],
+            "confidence": selected["confidence"],
+        }
+        for candidate in [candidate]:
             row = self._row_for_condition(features, prediction, candidate)
             for item in conditions:
                 condition = item["condition"]
