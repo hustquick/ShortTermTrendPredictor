@@ -8,8 +8,6 @@ from core.legacy_candidate_stream import (
     LEGACY_CANDIDATE_STREAM_CSV,
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
     LegacyCandidateStreamGenerator,
-    _active_candidate as _legacy_active_candidate,
-    legacy_candidates as _legacy_stream_candidates,
 )
 from data_download import ms_to_beijing_time
 from scripts.online_signal_filter_walkforward import _load_rows, _search_best_condition
@@ -362,40 +360,39 @@ class LegacyAdaptiveCoverageGate:
         if not conditions:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_active_window")
 
-        stream_candidates = _legacy_stream_candidates(features, prediction)
-        selected = _legacy_active_candidate(stream_candidates, self._candidate_stream._records_by_rule())
+        selected, _ = self._candidate_stream.selected_candidate(features, prediction)
         if selected is None:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_selected_candidate")
+
         candidate = {
             "rule": selected["name"],
             "direction": selected["direction"],
             "confidence": selected["confidence"],
         }
-        for candidate in [candidate]:
-            row = self._row_for_condition(features, prediction, candidate)
-            for item in conditions:
-                condition = item["condition"]
-                if not self._matches(condition, row):
-                    continue
-                reason = (
-                    "legacy_coverage_gate=pass;"
-                    f"legacy_rule={candidate['rule']};"
-                    f"legacy_condition={condition};"
-                    f"legacy_source={item.get('source', 'offline_rolling_coverage')};"
-                    f"legacy_report={self.report_path.name};"
-                    f"legacy_window={item.get('window', '')};"
-                    f"legacy_cover_start={item.get('cover_start', '')};"
-                    f"legacy_cover_end={item.get('cover_end', '')};"
-                    f"legacy_train_win_rate={item.get('train_win_rate', '')};"
-                    f"legacy_train_wilson_lower={item.get('train_wilson_lower', '')};"
-                    f"legacy_cover_win_rate={item.get('cover_win_rate', '')}"
-                )
-                return LegacyCoverageDecision(
-                    True,
-                    candidate["direction"],
-                    float(candidate["confidence"]),
-                    candidate["rule"],
-                    condition,
-                    reason,
-                )
+        row = self._row_for_condition(features, prediction, candidate)
+        for item in conditions:
+            condition = item["condition"]
+            if not self._matches(condition, row):
+                continue
+            reason = (
+                "legacy_coverage_gate=pass;"
+                f"legacy_rule={candidate['rule']};"
+                f"legacy_condition={condition};"
+                f"legacy_source={item.get('source', 'offline_rolling_coverage')};"
+                f"legacy_report={self.report_path.name};"
+                f"legacy_window={item.get('window', '')};"
+                f"legacy_cover_start={item.get('cover_start', '')};"
+                f"legacy_cover_end={item.get('cover_end', '')};"
+                f"legacy_train_win_rate={item.get('train_win_rate', '')};"
+                f"legacy_train_wilson_lower={item.get('train_wilson_lower', '')};"
+                f"legacy_cover_win_rate={item.get('cover_win_rate', '')}"
+            )
+            return LegacyCoverageDecision(
+                True,
+                candidate["direction"],
+                float(candidate["confidence"]),
+                candidate["rule"],
+                condition,
+                reason,
+            )
         return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_match")

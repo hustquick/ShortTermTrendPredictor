@@ -14,6 +14,11 @@ from config import (
     PREDICT_HORIZON_MINUTES,
 )
 from core.feature_pipeline import FeaturePipeline
+from core.legacy_candidate_stream import (
+    _active_candidate as legacy_active_candidate,
+    legacy_candidates,
+    legacy_state_ok,
+)
 from data_download import get_recent_klines_with_cache, ms_to_beijing_time
 from trainer import train_validation_model
 
@@ -26,63 +31,6 @@ def _feature_value(features, name: str, default: float = 0.0) -> float:
     if pd.isna(value):
         return default
     return float(value)
-
-
-def _legacy_candidates(features, prediction: dict) -> list[dict]:
-    p_up_raw = float(prediction.get("up_probability", 0.5))
-    p_up_signal = float(prediction.get("up_signal_probability", 0.0))
-    p_down_signal = float(prediction.get("down_signal_probability", 0.0))
-    ret_30 = _feature_value(features, "ret_30")
-    macd_hist = _feature_value(features, "macd_hist")
-    boll_position = _feature_value(features, "boll_position", 0.5)
-    close_position = _feature_value(features, "close_position", 0.5)
-    trend = _feature_value(features, "trend_agreement")
-
-    rules = []
-
-    def add(ok: bool, name: str, direction: str, confidence: float) -> None:
-        if ok:
-            rules.append({"name": name, "direction": direction, "confidence": float(confidence)})
-
-    add(p_up_raw <= 0.45, "short_pup_le_045", "down", max(p_down_signal, 1.0 - p_up_raw))
-    add(
-        p_up_raw <= 0.50 and boll_position > 0.10,
-        "short_pup_le_050_not_low",
-        "down",
-        max(p_down_signal, 1.0 - p_up_raw),
-    )
-    add(
-        p_up_raw <= 0.45 and ret_30 <= 0 and trend < 0,
-        "short_pup_le_045_ret30neg_trenddown",
-        "down",
-        max(p_down_signal, 1.0 - p_up_raw),
-    )
-    add(
-        p_up_raw >= 0.98 and boll_position < 0.85,
-        "long_pup_ge_098_not_high",
-        "up",
-        max(p_up_signal, p_up_raw),
-    )
-    add(
-        p_up_raw >= 0.85 and ret_30 >= 0 and macd_hist <= 0 and close_position < 0.95,
-        "long_pup_ge_085_ret30pos_macdneg_closeok",
-        "up",
-        max(p_up_signal, p_up_raw),
-    )
-    add(
-        p_up_raw >= 0.55 and boll_position < 0.85,
-        "long_pup_ge_055_not_high",
-        "up",
-        max(p_up_signal, p_up_raw),
-    )
-    return rules
-
-
-def _legacy_state_ok(features, prediction: dict, direction: str) -> bool:
-    p_up_raw = float(prediction.get("up_probability", 0.5))
-    rsi_14 = _feature_value(features, "rsi_14", 50.0)
-    ret_30 = _feature_value(features, "ret_30")
-    return direction == "down" and p_up_raw <= 0.285 and rsi_14 > 47.5 and ret_30 > -0.00013
 
 
 def _prediction_from_row(row: pd.Series) -> dict:
@@ -126,24 +74,6 @@ def _selected_candidate(candidates: list[dict], records_by_rule: dict[str, deque
     )[0]
 
 
-def _active_candidate(candidates: list[dict], records_by_rule: dict[str, deque[bool]]) -> dict | None:
-    scored = []
-    for rule in candidates:
-        samples, wins, win_rate = _stats(records_by_rule[rule["name"]])
-        scored.append({**rule, "prior_rule_samples": samples, "prior_rule_wins": wins, "prior_rule_win": win_rate})
-    active = [
-        item for item in scored
-        if item["prior_rule_samples"] >= 5 and item["prior_rule_win"] >= 0.80
-    ]
-    if not active:
-        return None
-    return sorted(
-        active,
-        key=lambda item: (item["prior_rule_win"], item["prior_rule_samples"], item["confidence"]),
-        reverse=True,
-    )[0]
-
-
 def build_stream_from_predictions(
     predictions: pd.DataFrame,
     output: Path,
@@ -157,11 +87,15 @@ def build_stream_from_predictions(
     rows = []
     for _, row in df.iterrows():
         prediction = _prediction_from_row(row)
-        candidates = _legacy_candidates(row, prediction)
+        candidates = legacy_candidates(row, prediction)
         if not candidates:
             continue
 
-        selected = _selected_candidate(candidates, records_by_rule) if emit_all_candidates else _active_candidate(candidates, records_by_rule)
+        selected = (
+            _selected_candidate(candidates, records_by_rule)
+            if emit_all_candidates
+            else legacy_active_candidate(candidates, records_by_rule)
+        )
         if selected is None:
             actual_direction = str(row["actual_direction"])
             for candidate in candidates:
@@ -170,7 +104,7 @@ def build_stream_from_predictions(
 
         actual_direction = str(row["actual_direction"])
         correct = selected["direction"] == actual_direction
-        state_ok = _legacy_state_ok(row, prediction, selected["direction"])
+        state_ok = legacy_state_ok(row, prediction, selected["direction"])
         is_valid_signal = (
             selected["prior_rule_samples"] >= 5
             and selected["prior_rule_win"] >= 0.80
@@ -264,7 +198,7 @@ def build_stream(
             continue
         prediction = model.predict_one(latest[model.feature_cols], signal_filter=None)
         feature_row = latest.iloc[0]
-        candidates = _legacy_candidates(feature_row, prediction)
+        candidates = legacy_candidates(feature_row, prediction)
         if not candidates:
             continue
 
@@ -277,13 +211,13 @@ def build_stream(
         future_return = future_price / current_price - 1
         actual_direction = "up" if future_price > current_price else "down"
 
-        selected = _active_candidate(candidates, records_by_rule)
+        selected = legacy_active_candidate(candidates, records_by_rule)
         if selected is None:
             for candidate in candidates:
                 records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
             continue
         correct = selected["direction"] == actual_direction
-        state_ok = _legacy_state_ok(feature_row, prediction, selected["direction"])
+        state_ok = legacy_state_ok(feature_row, prediction, selected["direction"])
         is_valid_signal = (
             selected["prior_rule_samples"] >= 5
             and selected["prior_rule_win"] >= 0.80
