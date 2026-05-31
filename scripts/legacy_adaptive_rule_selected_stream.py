@@ -78,14 +78,29 @@ def build_stream_from_predictions(
     predictions: pd.DataFrame,
     output: Path,
     emit_all_candidates: bool = False,
+    causal_validation_delay_minutes: int = 0,
 ) -> pd.DataFrame:
     df = predictions.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=10))
+    pending_outcomes = []
     rows = []
     for _, row in df.iterrows():
+        if causal_validation_delay_minutes > 0:
+            ready = []
+            still_pending = []
+            for due_time, outcomes in pending_outcomes:
+                if due_time <= row["timestamp"]:
+                    ready.append(outcomes)
+                else:
+                    still_pending.append((due_time, outcomes))
+            pending_outcomes = still_pending
+            for outcomes in ready:
+                for rule_name, direction, actual_direction in outcomes:
+                    records_by_rule[rule_name].append(direction == actual_direction)
+
         prediction = _prediction_from_row(row)
         candidates = legacy_candidates(row, prediction)
         if not candidates:
@@ -96,13 +111,22 @@ def build_stream_from_predictions(
             if emit_all_candidates
             else legacy_active_candidate(candidates, records_by_rule)
         )
+        actual_direction = str(row["actual_direction"])
+        candidate_outcomes = [
+            (candidate["name"], candidate["direction"], actual_direction)
+            for candidate in candidates
+        ]
         if selected is None:
-            actual_direction = str(row["actual_direction"])
-            for candidate in candidates:
-                records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
+            if causal_validation_delay_minutes > 0:
+                pending_outcomes.append((
+                    row["timestamp"] + pd.Timedelta(minutes=causal_validation_delay_minutes),
+                    candidate_outcomes,
+                ))
+            else:
+                for rule_name, direction, actual in candidate_outcomes:
+                    records_by_rule[rule_name].append(direction == actual)
             continue
 
-        actual_direction = str(row["actual_direction"])
         correct = selected["direction"] == actual_direction
         state_ok = legacy_state_ok(row, prediction, selected["direction"])
         is_valid_signal = (
@@ -127,8 +151,14 @@ def build_stream_from_predictions(
             "state_ok": bool(state_ok),
         })
         rows.append(out_row)
-        for candidate in candidates:
-            records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
+        if causal_validation_delay_minutes > 0:
+            pending_outcomes.append((
+                row["timestamp"] + pd.Timedelta(minutes=causal_validation_delay_minutes),
+                candidate_outcomes,
+            ))
+        else:
+            for rule_name, direction, actual in candidate_outcomes:
+                records_by_rule[rule_name].append(direction == actual)
 
     out = pd.DataFrame(rows)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -145,6 +175,7 @@ def build_stream(
     max_steps: int | None,
     output: Path,
     progress_every_steps: int,
+    causal_validation_delay_minutes: int = 0,
 ) -> pd.DataFrame:
     print("[legacy_stream] building features...")
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -170,11 +201,26 @@ def build_stream(
     next_model_update_idx = None
     model_trained_at_time = None
     records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=10))
+    pending_outcomes = []
     rows = []
     started = time.time()
     total = len(candidate_indices)
     for step_no, idx in enumerate(candidate_indices, start=1):
         point_time = ms_to_beijing_time(int(df.iloc[idx]["timestamp"]))
+        point_dt = pd.to_datetime(point_time)
+        if causal_validation_delay_minutes > 0:
+            ready = []
+            still_pending = []
+            for due_time, outcomes in pending_outcomes:
+                if due_time <= point_dt:
+                    ready.append(outcomes)
+                else:
+                    still_pending.append((due_time, outcomes))
+            pending_outcomes = still_pending
+            for outcomes in ready:
+                for rule_name, direction, actual_direction in outcomes:
+                    records_by_rule[rule_name].append(direction == actual_direction)
+
         if model is None or next_model_update_idx is None or idx >= next_model_update_idx:
             train_start = max(0, idx - train_window_minutes)
             train_df = df.iloc[train_start:idx].copy()
@@ -210,11 +256,21 @@ def build_stream(
         future_price = float(close_by_timestamp.loc[future_ms])
         future_return = future_price / current_price - 1
         actual_direction = "up" if future_price > current_price else "down"
+        candidate_outcomes = [
+            (candidate["name"], candidate["direction"], actual_direction)
+            for candidate in candidates
+        ]
 
         selected = legacy_active_candidate(candidates, records_by_rule)
         if selected is None:
-            for candidate in candidates:
-                records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
+            if causal_validation_delay_minutes > 0:
+                pending_outcomes.append((
+                    point_dt + pd.Timedelta(minutes=causal_validation_delay_minutes),
+                    candidate_outcomes,
+                ))
+            else:
+                for rule_name, direction, actual in candidate_outcomes:
+                    records_by_rule[rule_name].append(direction == actual)
             continue
         correct = selected["direction"] == actual_direction
         state_ok = legacy_state_ok(feature_row, prediction, selected["direction"])
@@ -256,8 +312,14 @@ def build_stream(
             "prior_rule_samples": selected["prior_rule_samples"],
             "state_ok": bool(state_ok),
         })
-        for candidate in candidates:
-            records_by_rule[candidate["name"]].append(candidate["direction"] == actual_direction)
+        if causal_validation_delay_minutes > 0:
+            pending_outcomes.append((
+                point_dt + pd.Timedelta(minutes=causal_validation_delay_minutes),
+                candidate_outcomes,
+            ))
+        else:
+            for rule_name, direction, actual in candidate_outcomes:
+                records_by_rule[rule_name].append(direction == actual)
         if step_no % progress_every_steps == 0:
             elapsed = time.time() - started
             print(f"[legacy_stream] {step_no}/{total} rows={len(rows)} elapsed={elapsed:.1f}s")
@@ -273,6 +335,7 @@ def build_stream(
         "train_window_minutes": train_window_minutes,
         "max_steps": max_steps,
         "candidate_steps": len(candidate_indices),
+        "causal_validation_delay_minutes": causal_validation_delay_minutes,
         "rows": len(out),
         "output": str(output),
     }
@@ -293,6 +356,15 @@ def main() -> None:
     parser.add_argument("--train-window-minutes", type=int, default=BACKTEST_TRAIN_WINDOW_MINUTES)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--progress-every-steps", type=int, default=1000)
+    parser.add_argument(
+        "--causal-validation-delay-minutes",
+        type=int,
+        default=0,
+        help=(
+            "Delay rule-outcome updates by this many minutes. Use 10 to match realtime "
+            "prediction validation timing; default 0 preserves the original optimistic stream."
+        ),
+    )
     parser.add_argument("--no-update-cache", action="store_true")
     parser.add_argument("--output", type=Path, default=DATA_DIR / "legacy_adaptive_rule_selected_stream.csv")
     parser.add_argument("--log", type=Path, default=None)
@@ -304,6 +376,7 @@ def main() -> None:
             predictions,
             args.output,
             emit_all_candidates=args.emit_all_candidates,
+            causal_validation_delay_minutes=args.causal_validation_delay_minutes,
         )
         valid = out[out["is_valid_signal"] == True]
         print("[legacy_stream] summary:")
@@ -336,6 +409,7 @@ def main() -> None:
                 max_steps=args.max_steps,
                 output=args.output,
                 progress_every_steps=args.progress_every_steps,
+                causal_validation_delay_minutes=args.causal_validation_delay_minutes,
             )
     else:
         out = build_stream(
@@ -347,6 +421,7 @@ def main() -> None:
             max_steps=args.max_steps,
             output=args.output,
             progress_every_steps=args.progress_every_steps,
+            causal_validation_delay_minutes=args.causal_validation_delay_minutes,
         )
     valid = out[out["is_valid_signal"] == True]
     print("[legacy_stream] summary:")
