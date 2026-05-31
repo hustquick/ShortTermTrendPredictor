@@ -155,13 +155,21 @@ class LegacyCandidateStreamGenerator:
             return records_by_rule
         rows = pd.concat(frames, ignore_index=True)
         rows["timestamp_dt"] = pd.to_datetime(rows["timestamp"], errors="coerce")
-        rows = rows[rows["timestamp_dt"].notna()].sort_values("timestamp_dt").tail(5000)
+        rows = rows[rows["timestamp_dt"].notna()].copy()
+        rows = rows.drop_duplicates(subset=["timestamp", "rule", "direction"], keep="last")
+        rows = rows.sort_values("timestamp_dt").tail(5000)
         for _, row in rows.iterrows():
             rule = str(row.get("rule", ""))
             if not rule:
                 continue
             records_by_rule[rule].append(str(row.get("direction", "")) == str(row.get("actual_direction", "")))
         return records_by_rule
+
+    def selected_candidate(self, features, prediction: dict) -> tuple[dict | None, list[dict]]:
+        candidates = legacy_candidates(features, prediction)
+        if not candidates:
+            return None, []
+        return _active_candidate(candidates, self._records_by_rule()), candidates
 
     def pending_row(
         self,
@@ -171,10 +179,9 @@ class LegacyCandidateStreamGenerator:
         signal_time: str,
         model_trained_at: str = "",
     ) -> dict | None:
-        candidates = legacy_candidates(features, prediction)
+        selected, candidates = self.selected_candidate(features, prediction)
         if not candidates:
             return None
-        selected = _active_candidate(candidates, self._records_by_rule())
         state_ok = legacy_state_ok(features, prediction, selected["direction"]) if selected is not None else False
         row = {
             "timestamp": signal_time,
