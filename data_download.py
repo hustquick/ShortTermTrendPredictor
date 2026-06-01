@@ -382,7 +382,6 @@ def fetch_klines_between(start_ms: int, end_ms: int) -> pd.DataFrame:
 
     failures = []
     sources = [
-        ("Binance", lambda: _fetch_binance_like_between("Binance", BINANCE_BASE_URL, start_ms, end_ms)),
         (
             "Binance Vision",
             lambda: _fetch_binance_like_between(
@@ -392,6 +391,7 @@ def fetch_klines_between(start_ms: int, end_ms: int) -> pd.DataFrame:
                 end_ms,
             ),
         ),
+        ("Binance", lambda: _fetch_binance_like_between("Binance", BINANCE_BASE_URL, start_ms, end_ms)),
         ("OKX", lambda: _fetch_okx_between(start_ms, end_ms)),
     ]
 

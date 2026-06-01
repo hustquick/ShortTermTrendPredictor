@@ -9,14 +9,19 @@ from core.legacy_candidate_stream import (
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
     LegacyCandidateStreamGenerator,
 )
+from core.rolling_coverage_engine import (
+    RollingCoverageConfig,
+    build_window_item,
+    load_candidate_rows,
+    matches_condition,
+)
 from data_download import ms_to_beijing_time
-from scripts.online_signal_filter_walkforward import _load_rows, _search_best_condition
 from strategies.base import feature_value
 from strategies.rules import _adaptive_feature_context
 
 
 DEFAULT_COVERAGE_REPORT = (
-    DATA_DIR / "rolling_coverage_365d_step1_update10080_train30_cover7_min5_strict_with_provenance.csv"
+    DATA_DIR / "rolling_coverage_365d_step1_update10080_train30_cover7_min5_causal_delay10_from_selected.csv"
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 DEFAULT_CANDIDATE_STREAM = LEGACY_CANDIDATE_STREAM_CSV
@@ -81,9 +86,21 @@ class LegacyAdaptiveCoverageGate:
         self.beam_size = beam_size
         self.cover_days = cover_days
         self.offline_latest_windows = offline_latest_windows
+        self._coverage_config = RollingCoverageConfig(
+            train_days=train_days,
+            cover_days=cover_days,
+            step_days=cover_days,
+            max_clauses=max_clauses,
+            min_samples=min_samples,
+            min_signals_per_day=min_signals_per_day,
+            min_win_rate=min_win_rate,
+            min_wilson_lower=min_wilson_lower,
+            beam_size=beam_size,
+        )
         self._loaded = False
         self._offline_conditions: list[dict] = []
         self._online_conditions: list[dict] = []
+        self._active_window_key: tuple[int, str] | None = None
         self._last_rediscover_ms = 0
         self._candidate_stream = LegacyCandidateStreamGenerator()
 
@@ -155,17 +172,10 @@ class LegacyAdaptiveCoverageGate:
         return ""
 
     def _candidate_training_rows(self) -> pd.DataFrame:
-        stream_paths = [LEGACY_ONLINE_CANDIDATE_STREAM_CSV, self.candidate_stream_path]
-        frames = []
-        for path in stream_paths:
-            if not path.exists():
-                continue
-            try:
-                frames.append(_load_rows(path))
-            except Exception:
-                continue
-        if frames:
-            return pd.concat(frames, ignore_index=True).sort_values("timestamp_dt").reset_index(drop=True)
+        stream_paths = [self.candidate_stream_path, LEGACY_ONLINE_CANDIDATE_STREAM_CSV]
+        df = load_candidate_rows(stream_paths)
+        if not df.empty:
+            return df
         if not self.validated_path.exists():
             return pd.DataFrame()
         try:
@@ -211,33 +221,21 @@ class LegacyAdaptiveCoverageGate:
         if df.empty:
             return
         now_dt = self._now_dt(now_ms)
-        cutoff = now_dt - pd.Timedelta(days=self.train_days)
-        df = df[(df["timestamp_dt"] >= cutoff) & (df["timestamp_dt"] < now_dt)].copy()
-        if len(df) < self.min_samples:
-            return
-        selected = _search_best_condition(
+        item = build_window_item(
             df,
-            max_clauses=self.max_clauses,
-            min_samples=self.min_samples,
-            min_signals_per_day=self.min_signals_per_day,
-            min_win_rate=self.min_win_rate,
-            min_wilson_lower=self.min_wilson_lower,
-            beam_size=self.beam_size,
+            now_dt,
+            self._coverage_config,
+            source="online_rolling_coverage",
         )
-        if selected is None:
+        if item is None or not item.get("condition"):
             self._online_conditions = []
+            self._active_window_key = None
             return
-        cover_start = now_dt.floor("min")
-        cover_end = cover_start + pd.Timedelta(days=self.cover_days)
-        selected = {
-            **selected,
-            "source": "online_rediscovery",
-            "window": "online",
-            "cover_win_rate": "",
-            "cover_start": str(cover_start),
-            "cover_end": str(cover_end),
-        }
-        self._online_conditions = [selected]
+        key = (int(item.get("window", 0)), str(item.get("condition", "")))
+        if self._active_window_key == key:
+            return
+        self._active_window_key = key
+        self._online_conditions = [item]
 
     @staticmethod
     def _legacy_candidates(features, prediction: dict) -> list[dict]:
@@ -326,29 +324,7 @@ class LegacyAdaptiveCoverageGate:
 
     @staticmethod
     def _matches(condition: str, row: dict) -> bool:
-        for part in condition.split(" & "):
-            part = part.strip()
-            if not part:
-                continue
-            if part.startswith("context="):
-                token = part.split("=", 1)[1]
-                if token not in str(row.get("adaptive_context", "")).split("|"):
-                    return False
-            elif "=" in part and "<=" not in part and ">" not in part:
-                column, value = part.split("=", 1)
-                if str(row.get(column, "")) != value:
-                    return False
-            elif "<=" in part:
-                column, value = part.split("<=", 1)
-                if float(row.get(column, float("nan"))) > float(value):
-                    return False
-            elif ">" in part:
-                column, value = part.split(">", 1)
-                if float(row.get(column, float("nan"))) <= float(value):
-                    return False
-            else:
-                return False
-        return True
+        return matches_condition(condition, row)
 
     def decide(self, features, prediction: dict) -> LegacyCoverageDecision:
         self._load()

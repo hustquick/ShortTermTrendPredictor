@@ -8,7 +8,9 @@ from config import DATA_DIR
 from strategies.base import feature_value
 
 
-LEGACY_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080.csv"
+LEGACY_CANDIDATE_STREAM_CSV = (
+    DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080_causal_delay10_from_selected.csv"
+)
 LEGACY_ONLINE_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_online_candidate_stream.csv"
 LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV = DATA_DIR / "legacy_online_candidate_rule_outcomes.csv"
 LEGACY_CANDIDATE_FEATURE_COLUMNS = (

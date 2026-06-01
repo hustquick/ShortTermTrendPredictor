@@ -4,11 +4,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from online_signal_filter_walkforward import (
-    _apply_condition,
-    _load_rows,
-    _search_best_condition,
+from core.rolling_coverage_engine import (
+    RollingCoverageConfig,
+    discover_window_condition,
 )
+from online_signal_filter_walkforward import _apply_condition, _load_rows
 
 
 def run_rolling_coverage(
@@ -25,6 +25,17 @@ def run_rolling_coverage(
     source_strategy: str,
     source_layer: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    config = RollingCoverageConfig(
+        train_days=train_days,
+        cover_days=cover_days,
+        step_days=step_days,
+        max_clauses=max_clauses,
+        min_samples=min_samples,
+        min_signals_per_day=min_signals_per_day,
+        min_win_rate=min_win_rate,
+        min_wilson_lower=min_wilson_lower,
+        beam_size=beam_size,
+    )
     start = df["timestamp_dt"].min() + pd.Timedelta(days=train_days)
     end = df["timestamp_dt"].max()
     current = start
@@ -42,15 +53,7 @@ def run_rolling_coverage(
             window_no += 1
             continue
 
-        selected = _search_best_condition(
-            train,
-            max_clauses=max_clauses,
-            min_samples=min_samples,
-            min_signals_per_day=min_signals_per_day,
-            min_win_rate=min_win_rate,
-            min_wilson_lower=min_wilson_lower,
-            beam_size=beam_size,
-        )
+        selected = discover_window_condition(df, current, config)
         if selected is None:
             rows.append({
                 "window": window_no,

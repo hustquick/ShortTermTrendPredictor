@@ -6,6 +6,7 @@ import os
 import pickle
 import sys
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from config import (
     ADAPTIVE_NOTIFY_MIN_EDGE,
     ADAPTIVE_RULE_MINER_MIN_WILSON_LOWER,
     ADAPTIVE_RULE_SWITCH_MAX_RECENT_LOSS_STREAK,
+    BACKTEST_MIN_TRAIN_SAMPLES,
+    BACKTEST_TRAIN_WINDOW_MINUTES,
     DATA_DIR,
     ALL_PREDICTIONS_CSV,
     HISTORICAL_MATCH_NOTIFY_MIN_MATCHED,
@@ -40,12 +43,17 @@ from config import (
 from core.alpha_model import AlphaModelManager
 from core.data_feed import RealtimeDataFeed
 from core.feature_pipeline import FeaturePipeline
-from core.legacy_candidate_stream import LegacyCandidateStreamGenerator
+from core.legacy_candidate_stream import (
+    LEGACY_CANDIDATE_STREAM_CSV,
+    LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV,
+    LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
+    LegacyCandidateStreamGenerator,
+)
 from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS, LegacyAdaptiveCoverageGate
 from core.notifier import EnterpriseWechatNotifier
 from core.output_store import PredictionOutputStore
 from core.risk_gate import RiskGate
-from data_download import ms_to_beijing_time
+from data_download import beijing_time_to_ms, get_recent_klines_with_cache, ms_to_beijing_time
 from historical_match_filter import build_walk_forward_historical_match_rows
 from kronos_adapter import KronosAdapter, KronosForecastResult
 from strategy_learning import build_learning_state, feature_signature, learning_decision
@@ -62,6 +70,8 @@ from strategies.rules import (
     ShortMomentumStrategy,
 )
 from strategies.base import StrategyDecision
+from scripts.legacy_adaptive_rule_selected_stream import build_stream_window as build_legacy_stream_window
+from trainer import train_validation_model
 
 
 STRATEGY_MAP = {
@@ -78,6 +88,11 @@ STRATEGY_MAP = {
 }
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
+LEGACY_ONLINE_BOOTSTRAP_STATE = DATA_DIR / "legacy_online_candidate_stream.bootstrap.json"
+LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = False
+LEGACY_LIVE_MODEL = None
+LEGACY_LIVE_MODEL_TRAINED_AT = ""
+LEGACY_LIVE_MODEL_NEXT_UPDATE_MS = 0
 VALIDATED_STRATEGY_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 STRATEGY_PREDICTIONS_CSV = DATA_DIR / "strategy_predictions.csv"
 STRATEGY_PREDICTIONS_LATEST_CSV = DATA_DIR / "strategy_predictions_latest.csv"
@@ -921,6 +936,7 @@ def register_prediction_signal(
     signal_time: str,
     features,
     quality_context: dict | None = None,
+    now_ms: int | None = None,
 ):
     prediction_id = f"{strategy_name}-{signal_timestamp}"
     validation_timestamp = signal_timestamp + PREDICT_HORIZON_MINUTES * 60_000
@@ -978,7 +994,6 @@ def register_prediction_signal(
         skip_reasons.append("not_official_strategy")
     if not quality_ok:
         skip_reasons.append(f"quality={quality_reason}")
-
     row = {
         "prediction_id": prediction_id,
         "strategy": strategy_name,
@@ -1004,6 +1019,7 @@ def register_prediction_signal(
                 prediction=prediction,
                 current_price=float(current_price),
                 signal_time=signal_time,
+                model_trained_at=LEGACY_LIVE_MODEL_TRAINED_AT,
             )
             if strategy_name == "adaptive_rule_switch"
             else None
@@ -1254,6 +1270,287 @@ def _build_quality_context(strategy_decisions: list[tuple[str, object]]) -> dict
     return {"confirmations": confirmations}
 
 
+def _latest_csv_timestamp(path: Path) -> pd.Timestamp | None:
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, usecols=["timestamp"])
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    timestamps = pd.to_datetime(df["timestamp"], errors="coerce")
+    timestamps = timestamps[timestamps.notna()]
+    if timestamps.empty:
+        return None
+    return timestamps.max()
+
+
+def _latest_bootstrap_target() -> pd.Timestamp | None:
+    if not LEGACY_ONLINE_BOOTSTRAP_STATE.exists():
+        return None
+    try:
+        payload = json.loads(LEGACY_ONLINE_BOOTSTRAP_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return pd.to_datetime(payload.get("generated_target"), errors="coerce")
+
+
+def _timestamp_to_ms(timestamp: pd.Timestamp | str) -> int:
+    ts = pd.to_datetime(timestamp)
+    return beijing_time_to_ms(ts.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def _legacy_static_metadata() -> dict:
+    if not LEGACY_CANDIDATE_STREAM_CSV.exists():
+        raise FileNotFoundError(f"missing legacy candidate stream: {LEGACY_CANDIDATE_STREAM_CSV}")
+    df = pd.read_csv(LEGACY_CANDIDATE_STREAM_CSV, usecols=["timestamp", "model_trained_at"])
+    if df.empty:
+        raise RuntimeError(f"empty legacy candidate stream: {LEGACY_CANDIDATE_STREAM_CSV}")
+    df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["anchor_dt"] = pd.to_datetime(df["model_trained_at"], errors="coerce")
+    df = df[df["timestamp_dt"].notna()].copy()
+    anchors = df["anchor_dt"].dropna()
+    if df.empty or anchors.empty:
+        raise RuntimeError(f"legacy candidate stream lacks timestamp/model anchor: {LEGACY_CANDIDATE_STREAM_CSV}")
+    return {
+        "last_timestamp": df["timestamp_dt"].max(),
+        "last_timestamp_ms": _timestamp_to_ms(df["timestamp_dt"].max()),
+        "last_anchor": anchors.max(),
+        "last_anchor_ms": _timestamp_to_ms(anchors.max()),
+    }
+
+
+def _expected_legacy_anchor_ms(point_ms: int, base_anchor_ms: int, update_minutes: int = 10080) -> int:
+    update_ms = int(update_minutes) * 60_000
+    if point_ms < base_anchor_ms:
+        return base_anchor_ms
+    return base_anchor_ms + ((int(point_ms) - base_anchor_ms) // update_ms) * update_ms
+
+
+def _online_stream_needs_rebuild(static_meta: dict) -> tuple[bool, str]:
+    if not LEGACY_ONLINE_CANDIDATE_STREAM_CSV.exists():
+        return False, "no_online_stream"
+    try:
+        df = pd.read_csv(LEGACY_ONLINE_CANDIDATE_STREAM_CSV, usecols=["timestamp", "model_trained_at"])
+    except Exception as exc:
+        return True, f"online_stream_unreadable:{type(exc).__name__}"
+    if df.empty:
+        return False, "online_stream_empty"
+    df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["anchor_dt"] = pd.to_datetime(df["model_trained_at"], errors="coerce")
+    df = df[df["timestamp_dt"].notna()].copy()
+    if df.empty:
+        return True, "online_stream_has_no_valid_timestamp"
+    first_ts = df["timestamp_dt"].min()
+    first_ms = _timestamp_to_ms(first_ts)
+    static_last_ms = int(static_meta["last_timestamp_ms"])
+    if first_ms - static_last_ms > 12 * 60 * 60_000:
+        return True, (
+            "online_stream_gap_too_large:"
+            f"static_last={static_meta['last_timestamp']}, online_first={first_ts}"
+        )
+    anchors = df["anchor_dt"].dropna().drop_duplicates()
+    if anchors.empty:
+        return True, "online_stream_has_no_model_anchor"
+    base_anchor_ms = int(static_meta["last_anchor_ms"])
+    update_ms = 10080 * 60_000
+    for anchor in anchors:
+        anchor_ms = _timestamp_to_ms(anchor)
+        if anchor_ms < base_anchor_ms or (anchor_ms - base_anchor_ms) % update_ms != 0:
+            return True, (
+                "online_stream_anchor_not_on_legacy_schedule:"
+                f"base={static_meta['last_anchor']}, online_anchor={anchor}"
+            )
+    return False, "online_stream_continuous"
+
+
+def _records_by_rule_until(
+    stream_paths: list[Path],
+    rule_outcome_paths: list[Path],
+    cutoff_dt: pd.Timestamp,
+) -> dict[str, deque[bool]]:
+    records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=10))
+    frames = []
+    for path in stream_paths:
+        if not path.exists():
+            continue
+        try:
+            frames.append(pd.read_csv(path, usecols=["timestamp", "rule", "direction", "actual_direction"]))
+        except Exception:
+            continue
+    for path in rule_outcome_paths:
+        if not path.exists():
+            continue
+        try:
+            frames.append(pd.read_csv(path, usecols=["timestamp", "rule", "direction", "actual_direction"]))
+        except Exception:
+            continue
+    if not frames:
+        return records_by_rule
+    rows = pd.concat(frames, ignore_index=True)
+    rows["timestamp_dt"] = pd.to_datetime(rows["timestamp"], errors="coerce")
+    rows = rows[rows["timestamp_dt"].notna() & (rows["timestamp_dt"] <= cutoff_dt)].copy()
+    rows = rows.drop_duplicates(subset=["timestamp", "rule", "direction"], keep="last")
+    rows = rows.sort_values("timestamp_dt").tail(5000)
+    for _, row in rows.iterrows():
+        rule = str(row.get("rule", ""))
+        if not rule:
+            continue
+        records_by_rule[rule].append(str(row.get("direction", "")) == str(row.get("actual_direction", "")))
+    return records_by_rule
+
+
+def _prepare_legacy_live_model_for_anchor(history: pd.DataFrame, anchor_ms: int) -> None:
+    global LEGACY_LIVE_MODEL, LEGACY_LIVE_MODEL_TRAINED_AT, LEGACY_LIVE_MODEL_NEXT_UPDATE_MS
+    history = history.sort_values("timestamp").reset_index(drop=True)
+    train_df = history[history["timestamp"] < int(anchor_ms)].tail(BACKTEST_TRAIN_WINDOW_MINUTES).copy()
+    if len(train_df) < BACKTEST_MIN_TRAIN_SAMPLES:
+        raise RuntimeError(f"legacy live model training samples too few: {len(train_df)}")
+    if LEGACY_LIVE_MODEL is not None and LEGACY_LIVE_MODEL_TRAINED_AT == ms_to_beijing_time(int(anchor_ms)):
+        return
+    anchor_time = ms_to_beijing_time(int(anchor_ms))
+    print(
+        "[realtime_strategy] training legacy live model: "
+        f"anchor={anchor_time}, train_rows={len(train_df)}"
+    )
+    LEGACY_LIVE_MODEL = train_validation_model(train_df)
+    LEGACY_LIVE_MODEL_TRAINED_AT = anchor_time
+    LEGACY_LIVE_MODEL_NEXT_UPDATE_MS = int(anchor_ms) + 10080 * 60_000
+    print(
+        "[realtime_strategy] legacy live model ready: "
+        f"trained_at={LEGACY_LIVE_MODEL_TRAINED_AT}, "
+        f"next_update_after={ms_to_beijing_time(LEGACY_LIVE_MODEL_NEXT_UPDATE_MS)}"
+    )
+
+
+def _bootstrap_legacy_online_candidate_stream(now_ms: int, update_cache: bool) -> None:
+    """Fill the live legacy candidate stream gap before realtime gating starts.
+
+    The rolling coverage backtest discovers rules from a causal selected-candidate
+    stream.  A fresh live process must therefore have the same recent stream and
+    all-candidate rule outcomes available before it can reproduce the backtest
+    gate density.
+    """
+    global LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS
+    if (
+        LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS
+        and LEGACY_LIVE_MODEL is not None
+        and now_ms < LEGACY_LIVE_MODEL_NEXT_UPDATE_MS
+    ):
+        return
+
+    static_meta = _legacy_static_metadata()
+    target_ms = int(now_ms) - PREDICT_HORIZON_MINUTES * 60_000
+    target_dt = pd.to_datetime(ms_to_beijing_time(target_ms))
+    bootstrapped_target = _latest_bootstrap_target()
+    rebuild_online, rebuild_reason = _online_stream_needs_rebuild(static_meta)
+    if rebuild_online:
+        for path in (
+            LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
+            LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV,
+            LEGACY_ONLINE_BOOTSTRAP_STATE,
+        ):
+            if path.exists():
+                path.unlink()
+        bootstrapped_target = None
+        print(f"[realtime_strategy] reset legacy online stream: {rebuild_reason}")
+    online_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_STREAM_CSV)
+    start_dt = (
+        online_latest + pd.Timedelta(minutes=1)
+        if online_latest is not None
+        else static_meta["last_timestamp"] + pd.Timedelta(minutes=1)
+    )
+    start_ms = _timestamp_to_ms(start_dt)
+    current_anchor_ms = _expected_legacy_anchor_ms(now_ms, int(static_meta["last_anchor_ms"]))
+    base_anchor_ms = int(static_meta["last_anchor_ms"])
+    required_start_ms = min(
+        base_anchor_ms - BACKTEST_TRAIN_WINDOW_MINUTES * 60_000,
+        current_anchor_ms - BACKTEST_TRAIN_WINDOW_MINUTES * 60_000,
+        start_ms - 8 * 60 * 60_000,
+    )
+    required_minutes = max(
+        BACKTEST_TRAIN_WINDOW_MINUTES + PREDICT_HORIZON_MINUTES + 5,
+        int((int(now_ms) - required_start_ms) // 60_000) + PREDICT_HORIZON_MINUTES + 5,
+    )
+    history = get_recent_klines_with_cache(
+        minutes=required_minutes,
+        update_if_needed=update_cache,
+    )
+    _prepare_legacy_live_model_for_anchor(history, current_anchor_ms)
+
+    stream_is_current = (
+        online_latest is not None
+        and bootstrapped_target is not None
+        and bootstrapped_target >= target_dt - pd.Timedelta(minutes=1)
+        and online_latest >= target_dt - pd.Timedelta(hours=12)
+        and LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV.exists()
+    )
+    if stream_is_current:
+        print(
+            "[realtime_strategy] legacy online candidate stream bootstrap is current: "
+            f"generated_target={bootstrapped_target}, target={target_dt}, "
+            f"legacy_anchor={LEGACY_LIVE_MODEL_TRAINED_AT}"
+        )
+        LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = True
+        return
+
+    if start_dt > target_dt:
+        LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = True
+        return
+
+    print(
+        "[realtime_strategy] bootstrapping legacy online candidate stream: "
+        f"start={start_dt}, target={target_dt}, "
+        f"static_latest={static_meta['last_timestamp']}, online_latest={online_latest}, "
+        f"base_anchor={static_meta['last_anchor']}"
+    )
+    cutoff_dt = start_dt - pd.Timedelta(minutes=PREDICT_HORIZON_MINUTES)
+    records_by_rule = _records_by_rule_until(
+        [LEGACY_CANDIDATE_STREAM_CSV, LEGACY_ONLINE_CANDIDATE_STREAM_CSV],
+        [LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV],
+        cutoff_dt,
+    )
+    build_legacy_stream_window(
+        df=history,
+        start_ms=start_ms,
+        end_ms=target_ms,
+        model_anchor_ms=int(static_meta["last_anchor_ms"]),
+        step_minutes=1,
+        model_update_minutes=10080,
+        train_window_minutes=BACKTEST_TRAIN_WINDOW_MINUTES,
+        output=LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
+        progress_every_steps=1000,
+        causal_validation_delay_minutes=PREDICT_HORIZON_MINUTES,
+        rule_outcome_output=LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV,
+        records_by_rule=records_by_rule,
+        append=not rebuild_online and LEGACY_ONLINE_CANDIDATE_STREAM_CSV.exists(),
+    )
+    bootstrapped_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_STREAM_CSV)
+    LEGACY_ONLINE_BOOTSTRAP_STATE.write_text(
+        json.dumps(
+            {
+                "generated_start": str(start_dt),
+                "generated_target": str(target_dt),
+                "stream_latest": str(bootstrapped_latest),
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "base_anchor": str(static_meta["last_anchor"]),
+                "live_anchor": LEGACY_LIVE_MODEL_TRAINED_AT,
+                "rebuild_reason": rebuild_reason,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        "[realtime_strategy] legacy online candidate stream bootstrapped: "
+        f"latest={bootstrapped_latest}, stream={LEGACY_ONLINE_CANDIDATE_STREAM_CSV}, "
+        f"rule_outcomes={LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV}"
+    )
+    LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = True
+
+
 def run_realtime_strategies(
     strategy_names: str = "short_momentum,relaxed_scenario,historical_match,kronos_confirm,finstar_scenario",
     train_minutes: int = 48 * 60,
@@ -1313,6 +1610,8 @@ def run_realtime_strategies(
                 continue
 
             now_ms = int(df.iloc[-1]["timestamp"])
+            if "adaptive_rule_switch" in names:
+                _bootstrap_legacy_online_candidate_stream(now_ms, update_cache=update_cache)
             validate_due_signals(df, now_ms)
             if live_chart_window is not None:
                 live_chart_window.update()
@@ -1347,7 +1646,7 @@ def run_realtime_strategies(
             else:
                 rows_to_process = feature_df[
                     pd.to_numeric(feature_df["timestamp"], errors="coerce") > last_processed_signal_timestamp
-                ].tail(20)
+                ].sort_values("timestamp").tail(20)
             if rows_to_process.empty:
                 print("[realtime_strategy] no new feature rows")
                 if once:
@@ -1361,6 +1660,18 @@ def run_realtime_strategies(
                 latest = feature_row.to_frame().T
                 latest_features = latest[alpha_model.feature_cols]
                 prediction = alpha_model.predict_one(latest_features)
+                legacy_prediction = None
+                if "adaptive_rule_switch" in names:
+                    if LEGACY_LIVE_MODEL is None:
+                        raise RuntimeError("legacy live model is not prepared")
+                    legacy_latest_features = latest[LEGACY_LIVE_MODEL.feature_cols]
+                    if legacy_latest_features.isna().any(axis=None):
+                        print(
+                            "[realtime_strategy] legacy live features contain NaN; "
+                            f"time={ms_to_beijing_time(int(feature_row['timestamp']))}"
+                        )
+                        continue
+                    legacy_prediction = LEGACY_LIVE_MODEL.predict_one(legacy_latest_features)
 
                 current_price = float(close_by_timestamp.loc[signal_timestamp])
                 signal_time = ms_to_beijing_time(signal_timestamp)
@@ -1369,9 +1680,17 @@ def run_realtime_strategies(
                     "[realtime_strategy] dual-model output: "
                     f"time={signal_time}, price={current_price:.2f}, "
                     f"up_model={prediction.get('up_signal_probability'):.4f}, "
-                    f"down_model={prediction.get('down_signal_probability'):.4f}, "
-                    f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
-                )
+                        f"down_model={prediction.get('down_signal_probability'):.4f}, "
+                        f"edge_up_minus_down={prediction.get('direction_edge'):.4f}"
+                    )
+                if legacy_prediction is not None:
+                    print(
+                        "[realtime_strategy] legacy live output: "
+                        f"time={signal_time}, trained_at={LEGACY_LIVE_MODEL_TRAINED_AT}, "
+                        f"up_model={legacy_prediction.get('up_signal_probability'):.4f}, "
+                        f"down_model={legacy_prediction.get('down_signal_probability'):.4f}, "
+                        f"edge_up_minus_down={legacy_prediction.get('direction_edge'):.4f}"
+                    )
 
                 if kronos_adapter is not None:
                     should_run_kronos, kronos_skip_reason = _should_run_kronos(prediction)
@@ -1389,11 +1708,18 @@ def run_realtime_strategies(
                     )
 
                 strategy_decisions = []
+                prediction_by_strategy = {}
                 legacy_coverage_context = None
                 for strategy in strategies:
-                    decision = strategy.decide(feature_row, prediction)
+                    strategy_prediction = (
+                        legacy_prediction
+                        if strategy.name == "adaptive_rule_switch" and legacy_prediction is not None
+                        else prediction
+                    )
+                    prediction_by_strategy[strategy.name] = strategy_prediction
+                    decision = strategy.decide(feature_row, strategy_prediction)
                     if strategy.name == "adaptive_rule_switch":
-                        legacy_decision = legacy_coverage_gate.decide(feature_row, prediction)
+                        legacy_decision = legacy_coverage_gate.decide(feature_row, strategy_prediction)
                         if legacy_decision.accepted:
                             legacy_coverage_context = legacy_decision
                             decision = StrategyDecision(
@@ -1406,9 +1732,9 @@ def run_realtime_strategies(
                         "[realtime_strategy] strategy decision: "
                         f"strategy={strategy.name}, direction={decision.direction}, "
                         f"confidence={decision.confidence:.4f}, reason={decision.reason}, "
-                        f"up_model={prediction.get('up_signal_probability'):.4f}, "
-                        f"down_model={prediction.get('down_signal_probability'):.4f}, "
-                        f"edge={prediction.get('direction_edge'):.4f}"
+                        f"up_model={strategy_prediction.get('up_signal_probability'):.4f}, "
+                        f"down_model={strategy_prediction.get('down_signal_probability'):.4f}, "
+                        f"edge={strategy_prediction.get('direction_edge'):.4f}"
                     )
 
                 if legacy_coverage_context is not None:
@@ -1442,14 +1768,17 @@ def run_realtime_strategies(
                     register_prediction_signal(
                         strategy_name=strategy_name,
                         decision=decision,
-                        prediction=prediction,
+                        prediction=prediction_by_strategy.get(strategy_name, prediction),
                         current_price=current_price,
                         signal_timestamp=signal_timestamp,
                         signal_time=signal_time,
                         features=feature_row,
                         quality_context=quality_context,
+                        now_ms=now_ms,
                     )
                 last_processed_signal_timestamp = signal_timestamp
+
+            validate_due_signals(df, now_ms)
 
             render_strategy_charts(names)
             if live_chart_window is not None:
