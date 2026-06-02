@@ -1,5 +1,6 @@
 # config.py
 
+import os
 from pathlib import Path
 
 # =========================
@@ -66,10 +67,7 @@ REQUEST_TIMEOUT = 15
 # =========================
 
 ENABLE_WECHAT_NOTIFICATIONS = True
-WECHAT_WEBHOOK_URL = (
-    "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?"
-    "key=b614abd2-e508-447e-afc7-d9f86fe1edc0"
-)
+WECHAT_WEBHOOK_URL = os.getenv("WECHAT_WEBHOOK_URL", "")
 WECHAT_REQUEST_TIMEOUT = 10
 
 # =========================

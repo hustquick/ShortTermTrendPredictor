@@ -86,9 +86,7 @@ timestamp,current_price,future_price,predicted_direction,actual_direction,up_pro
 ## 安装
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+~/btc_env/bin/pip install -r requirements.txt
 ```
 
 可选：
@@ -105,19 +103,19 @@ export BINANCE_API_SECRET="your_api_secret"
 训练最近 48 小时过拟合模型：
 
 ```bash
-python3 main.py --mode train
+~/btc_env/bin/python main.py --mode train
 ```
 
 第一阶段训练回测，允许未来数据泄露：
 
 ```bash
-python3 main.py --mode training_backtest
+~/btc_env/bin/python main.py --mode training_backtest
 ```
 
 第二阶段严格时序验证回测：
 
 ```bash
-python3 main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --model-update-minutes 30
+~/btc_env/bin/python main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --model-update-minutes 30
 ```
 
 严格回测已经接入 `core` 流程，和实时多策略模式共用策略集合、生产质量门控、自学习滚动门控和正式信号判定逻辑。回测结果中的 `is_valid_signal=True` 等价于实时模式会写入 `data/official_signals.csv` 的正式信号；低置信或 `no_trade` 预测仍会作为观察样本保留。
@@ -125,44 +123,45 @@ python3 main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --mod
 默认严格回测使用训练窗口快速历史匹配池，保证预测点不使用未来数据；如果需要历史匹配池本身也完全 walk-forward 样本外，可启用更慢的模式：
 
 ```bash
-python3 main.py --mode strict_backtest --backtest-days 10 --walk-forward-match-pool
+~/btc_env/bin/python main.py --mode strict_backtest --backtest-days 10 --walk-forward-match-pool
 ```
 
 如果只想快速抽样，可以限制最大预测点数：
 
 ```bash
-python3 main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --model-update-minutes 30 --max-steps 3000
+~/btc_env/bin/python main.py --mode strict_backtest --backtest-days 10 --step-minutes 1 --model-update-minutes 30 --max-steps 3000
 ```
 
 启动实时预测：
 
 ```bash
-python3 main.py --mode realtime
+~/btc_env/bin/python main.py --mode realtime
 ```
 
 启动当前高胜率实时策略通知：
 
 ```bash
-python3 main.py --mode realtime_strategies
+export WECHAT_WEBHOOK_URL="你的企业微信机器人 webhook"
+~/btc_env/bin/python main.py --mode realtime_strategies
 ```
 
 当前默认只运行 `historical_match_short` 作为正式高置信策略。该策略在最新已验证样本中表现最好，`historical_match_long` 暂不作为正式信号；如果需要继续观察所有策略，可以运行：
 
 ```bash
-python3 main.py --mode realtime_strategies --observe-all
+~/btc_env/bin/python main.py --mode realtime_strategies --observe-all
 ```
 
 前台运行并打开 matplotlib 实时滚动图表窗口：
 
 ```bash
-python3 main.py --mode realtime_strategies --observe-all --live-chart
+~/btc_env/bin/python main.py --mode realtime_strategies --observe-all --live-chart
 ```
 
 系统会为每个策略打开一个独立图表窗口。每个窗口上方是最近 30 分钟滚动双 Y 轴图，横轴右侧固定为最新预测时间，左轴为 BTC 价格，右轴为置信度；灰色三角形表示未验证，绿色表示验证正确，红色表示验证错误。窗口下方是按置信度区间分桶的已验证准确率直方图。
 
 `finstar_scenario` 已收紧为必须通过历史相似样本验证才允许出信号，避免只凭高模型置信度放行低质量场景信号。
 
-企业微信通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。当前生产白名单包含 `historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive 和 Kronos 还必须通过额外生产质量门槛，未通过时继续记录和验证但不推送企业微信。
+企业微信通知白名单固定在 `config.py` 的 `OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST`。Webhook 不写入代码，运行前通过 `WECHAT_WEBHOOK_URL` 环境变量传入。当前生产白名单包含 `historical_match`、`historical_match_short`、`adaptive_dual`、`kronos_confirm`、`kronos_lead`；其中 adaptive 和 Kronos 还必须通过额外生产质量门槛，未通过时继续记录和验证但不推送企业微信。
 
 历史相似样本匹配使用 walk-forward 样本外概率池：每个历史样本只使用该时间桶之前的数据训练出来的模型概率，避免当前模型回头给整段历史打分造成 `success_rate=1.0000` 的乐观偏差。历史池默认每 120 分钟重训一次以控制实时启动耗时，实时主模型仍按原配置重训。
 
