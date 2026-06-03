@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 from config import BACKTEST_TRAIN_WINDOW_MINUTES, DATA_DIR, PREDICT_HORIZON_MINUTES
 from core.feature_pipeline import FeaturePipeline
+from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS
 from core.legacy_candidate_stream import (
     _active_candidate as legacy_active_candidate,
     legacy_candidates,
@@ -274,21 +275,7 @@ def build_fast_stream(args: argparse.Namespace) -> pd.DataFrame:
             "prior_rule_samples": selected["prior_rule_samples"],
             "state_ok": bool(state_ok),
         }
-        for column in (
-            "ret_5",
-            "ret_10",
-            "ret_30",
-            "ema_10_30_diff",
-            "ema_20_60_diff",
-            "macd_hist",
-            "rsi_14",
-            "close_position",
-            "body_ratio",
-            "upper_shadow_ratio",
-            "lower_shadow_ratio",
-            "taker_buy_ratio",
-            "trend_agreement",
-        ):
+        for column in FEATURE_COLUMNS:
             row[column] = feature_row.get(column)
         rows.append(row)
 

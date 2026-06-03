@@ -62,6 +62,70 @@ def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     return tr.rolling(window).mean()
 
 
+def _add_multi_timeframe_features(df: pd.DataFrame, timeframe_minutes: int) -> pd.DataFrame:
+    prefix = f"mtf_{timeframe_minutes}m"
+    timeframe_ms = int(timeframe_minutes) * 60_000
+    source = df[
+        [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_asset_volume",
+            "number_of_trades",
+            "taker_buy_base_volume",
+        ]
+    ].copy()
+    source["_bucket"] = (source["timestamp"] // timeframe_ms).astype("int64")
+    source["_pos"] = ((source["timestamp"] // 60_000) % timeframe_minutes).astype("int64")
+
+    grouped = (
+        source.groupby("_bucket", as_index=False)
+        .agg(
+            timestamp=("timestamp", "last"),
+            open=("open", "first"),
+            high=("high", "max"),
+            low=("low", "min"),
+            close=("close", "last"),
+            volume=("volume", "sum"),
+            quote_asset_volume=("quote_asset_volume", "sum"),
+            number_of_trades=("number_of_trades", "sum"),
+            taker_buy_base_volume=("taker_buy_base_volume", "sum"),
+        )
+        .sort_values("_bucket")
+        .reset_index(drop=True)
+    )
+    close = grouped["close"]
+    grouped[f"{prefix}_ret_1"] = close.pct_change(1)
+    grouped[f"{prefix}_ret_2"] = close.pct_change(2)
+    grouped[f"{prefix}_ret_3"] = close.pct_change(3)
+    grouped[f"{prefix}_ret_5"] = close.pct_change(5)
+    grouped[f"{prefix}_ema_5_20_diff"] = _ema(close, 5) / (_ema(close, 20) + 1e-12) - 1
+    grouped[f"{prefix}_ema_10_30_diff"] = _ema(close, 10) / (_ema(close, 30) + 1e-12) - 1
+    _, _, macd_hist = _macd(close)
+    grouped[f"{prefix}_macd_hist"] = macd_hist
+    grouped[f"{prefix}_macd_hist_diff"] = macd_hist.diff()
+    grouped[f"{prefix}_rsi_14"] = _rsi(close, 14)
+    grouped[f"{prefix}_volatility_5"] = close.pct_change().rolling(5).std()
+    grouped[f"{prefix}_trend_1"] = np.sign(close - close.shift(1))
+    grouped[f"{prefix}_trend_3"] = np.sign(close - close.shift(3))
+    grouped[f"{prefix}_trend_5"] = np.sign(close - close.shift(5))
+    grouped[f"{prefix}_trend_agreement"] = (
+        grouped[f"{prefix}_trend_1"] + grouped[f"{prefix}_trend_3"] + grouped[f"{prefix}_trend_5"]
+    ) / 3.0
+    grouped[f"{prefix}_taker_buy_ratio"] = grouped["taker_buy_base_volume"] / (grouped["volume"] + 1e-12)
+    grouped[f"{prefix}_volume_ratio_5"] = grouped["volume"] / (grouped["volume"].rolling(5).mean() + 1e-12)
+
+    feature_cols = [col for col in grouped.columns if col.startswith(prefix)]
+    closed_bucket = source["_bucket"].where(source["_pos"] == timeframe_minutes - 1, source["_bucket"] - 1)
+    mapped = pd.DataFrame({"_closed_bucket": closed_bucket})
+    htf_features = grouped[["_bucket", *feature_cols]].rename(columns={"_bucket": "_closed_bucket"})
+    mapped = mapped.merge(htf_features, on="_closed_bucket", how="left")
+    return pd.concat([df, mapped[feature_cols].reset_index(drop=True)], axis=1)
+
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     构建模型特征。
@@ -239,6 +303,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["minute_cos"] = np.cos(2 * np.pi * minute_of_day / 1_440)
     df["dow_sin"] = np.sin(2 * np.pi * day_of_week / 7)
     df["dow_cos"] = np.cos(2 * np.pi * day_of_week / 7)
+
+    df = _add_multi_timeframe_features(df, 3)
+    df = _add_multi_timeframe_features(df, 5)
 
     return df
 

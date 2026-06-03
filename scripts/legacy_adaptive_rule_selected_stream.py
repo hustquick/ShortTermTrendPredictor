@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import os
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -14,6 +15,8 @@ from config import (
     PREDICT_HORIZON_MINUTES,
 )
 from core.feature_pipeline import FeaturePipeline
+from core.fast_mtf_model import train_fast_mtf_extra_trees_model
+from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS
 from core.legacy_candidate_stream import (
     _active_candidate as legacy_active_candidate,
     legacy_candidates,
@@ -42,6 +45,17 @@ def _prediction_from_row(row: pd.Series) -> dict:
         "up_signal_probability": p_up_signal,
         "down_signal_probability": p_down_signal,
     }
+
+
+def _feature_payload(feature_row: pd.Series) -> dict:
+    return {column: feature_row.get(column) for column in FEATURE_COLUMNS}
+
+
+def _train_stream_model(train_df: pd.DataFrame):
+    if os.getenv("LEGACY_LIVE_MODEL_TYPE", "legacy_dual") == "mtf_extra_trees":
+        train_features = FeaturePipeline().build(train_df)
+        return train_fast_mtf_extra_trees_model(train_features)
+    return train_validation_model(train_df)
 
 
 def _stats(records: deque[bool]) -> tuple[int, int, float]:
@@ -251,7 +265,7 @@ def build_stream(
                 "[legacy_stream] model update start: "
                 f"step={step_no}/{total}, point_time={point_time}, train_rows={len(train_df)}"
             )
-            model = train_validation_model(train_df)
+            model = _train_stream_model(train_df)
             print(
                 "[legacy_stream] model update done: "
                 f"step={step_no}/{total}, elapsed={time.time() - train_started:.1f}s"
@@ -309,7 +323,7 @@ def build_stream(
             and selected["prior_rule_win"] >= 0.80
             and state_ok
         )
-        rows.append({
+        row = {
             "timestamp": point_time,
             "current_price": current_price,
             "future_price": future_price,
@@ -321,19 +335,6 @@ def build_stream(
             "is_valid_signal": bool(is_valid_signal),
             "is_correct": bool(correct) if is_valid_signal else False,
             "model_trained_at": model_trained_at_time,
-            "ret_5": feature_row.get("ret_5"),
-            "ret_10": feature_row.get("ret_10"),
-            "ret_30": feature_row.get("ret_30"),
-            "ema_10_30_diff": feature_row.get("ema_10_30_diff"),
-            "ema_20_60_diff": feature_row.get("ema_20_60_diff"),
-            "macd_hist": feature_row.get("macd_hist"),
-            "rsi_14": feature_row.get("rsi_14"),
-            "close_position": feature_row.get("close_position"),
-            "body_ratio": feature_row.get("body_ratio"),
-            "upper_shadow_ratio": feature_row.get("upper_shadow_ratio"),
-            "lower_shadow_ratio": feature_row.get("lower_shadow_ratio"),
-            "taker_buy_ratio": feature_row.get("taker_buy_ratio"),
-            "trend_agreement": feature_row.get("trend_agreement"),
             "dt": point_time,
             "rule": selected["name"],
             "direction": selected["direction"],
@@ -341,7 +342,9 @@ def build_stream(
             "prior_rule_win": selected["prior_rule_win"],
             "prior_rule_samples": selected["prior_rule_samples"],
             "state_ok": bool(state_ok),
-        })
+        }
+        row.update(_feature_payload(feature_row))
+        rows.append(row)
         if causal_validation_delay_minutes > 0:
             pending_outcomes.append((
                 point_dt + pd.Timedelta(minutes=causal_validation_delay_minutes),
@@ -469,7 +472,7 @@ def build_stream_window(
                 "[legacy_stream] window model update start: "
                 f"step={step_no}/{total}, anchor={anchor_time}, train_rows={len(train_df)}"
             )
-            model = train_validation_model(train_df)
+            model = _train_stream_model(train_df)
             trained_anchor_ms = active_anchor_ms
             print(
                 "[legacy_stream] window model update done: "
@@ -523,7 +526,7 @@ def build_stream_window(
             and selected["prior_rule_win"] >= 0.80
             and state_ok
         )
-        rows.append({
+        row = {
             "timestamp": point_time,
             "current_price": current_price,
             "future_price": future_price,
@@ -535,19 +538,6 @@ def build_stream_window(
             "is_valid_signal": bool(is_valid_signal),
             "is_correct": bool(correct) if is_valid_signal else False,
             "model_trained_at": ms_to_beijing_time(trained_anchor_ms),
-            "ret_5": feature_row.get("ret_5"),
-            "ret_10": feature_row.get("ret_10"),
-            "ret_30": feature_row.get("ret_30"),
-            "ema_10_30_diff": feature_row.get("ema_10_30_diff"),
-            "ema_20_60_diff": feature_row.get("ema_20_60_diff"),
-            "macd_hist": feature_row.get("macd_hist"),
-            "rsi_14": feature_row.get("rsi_14"),
-            "close_position": feature_row.get("close_position"),
-            "body_ratio": feature_row.get("body_ratio"),
-            "upper_shadow_ratio": feature_row.get("upper_shadow_ratio"),
-            "lower_shadow_ratio": feature_row.get("lower_shadow_ratio"),
-            "taker_buy_ratio": feature_row.get("taker_buy_ratio"),
-            "trend_agreement": feature_row.get("trend_agreement"),
             "dt": point_time,
             "rule": selected["name"],
             "direction": selected["direction"],
@@ -555,7 +545,9 @@ def build_stream_window(
             "prior_rule_win": selected["prior_rule_win"],
             "prior_rule_samples": selected["prior_rule_samples"],
             "state_ok": bool(state_ok),
-        })
+        }
+        row.update(_feature_payload(feature_row))
+        rows.append(row)
         if causal_validation_delay_minutes > 0:
             pending_outcomes.append((
                 point_dt + pd.Timedelta(minutes=causal_validation_delay_minutes),

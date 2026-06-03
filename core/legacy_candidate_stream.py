@@ -1,5 +1,6 @@
 import json
 from collections import defaultdict, deque
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +10,10 @@ from strategies.base import feature_value
 
 
 LEGACY_CANDIDATE_STREAM_CSV = (
-    DATA_DIR / "legacy_recovered_selected_stream_365d_plus_online_causal_delay10_expanded_candidates.csv"
+    Path(os.getenv(
+        "LEGACY_CANDIDATE_STREAM",
+        str(DATA_DIR / "legacy_recovered_selected_stream_365d_plus_online_causal_delay10_expanded_candidates.csv"),
+    ))
 )
 LEGACY_ONLINE_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_online_candidate_stream.csv"
 LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV = DATA_DIR / "legacy_online_candidate_rule_outcomes.csv"

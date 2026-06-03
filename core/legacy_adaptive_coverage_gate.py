@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -22,7 +23,10 @@ from strategies.rules import _adaptive_feature_context
 
 
 DEFAULT_COVERAGE_REPORT = (
-    DATA_DIR / "rolling_coverage_365d_plus_online_train30_cover7_min10_causal_delay10_expanded_candidates.csv"
+    Path(os.getenv(
+        "LEGACY_COVERAGE_REPORT",
+        str(DATA_DIR / "rolling_coverage_365d_plus_online_train30_cover7_min10_causal_delay10_expanded_candidates.csv"),
+    ))
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 DEFAULT_CANDIDATE_STREAM = LEGACY_CANDIDATE_STREAM_CSV
@@ -40,6 +44,32 @@ FEATURE_COLUMNS = (
     "lower_shadow_ratio",
     "taker_buy_ratio",
     "trend_agreement",
+    "mtf_3m_ret_1",
+    "mtf_3m_ret_2",
+    "mtf_3m_ret_3",
+    "mtf_3m_ret_5",
+    "mtf_3m_ema_5_20_diff",
+    "mtf_3m_ema_10_30_diff",
+    "mtf_3m_macd_hist",
+    "mtf_3m_macd_hist_diff",
+    "mtf_3m_rsi_14",
+    "mtf_3m_volatility_5",
+    "mtf_3m_trend_agreement",
+    "mtf_3m_taker_buy_ratio",
+    "mtf_3m_volume_ratio_5",
+    "mtf_5m_ret_1",
+    "mtf_5m_ret_2",
+    "mtf_5m_ret_3",
+    "mtf_5m_ret_5",
+    "mtf_5m_ema_5_20_diff",
+    "mtf_5m_ema_10_30_diff",
+    "mtf_5m_macd_hist",
+    "mtf_5m_macd_hist_diff",
+    "mtf_5m_rsi_14",
+    "mtf_5m_volatility_5",
+    "mtf_5m_trend_agreement",
+    "mtf_5m_taker_buy_ratio",
+    "mtf_5m_volume_ratio_5",
 )
 
 

@@ -43,6 +43,7 @@ from config import (
 )
 from core.alpha_model import AlphaModelManager
 from core.data_feed import RealtimeDataFeed
+from core.fast_mtf_model import train_fast_mtf_extra_trees_model
 from core.feature_pipeline import FeaturePipeline
 from core.legacy_candidate_stream import (
     LEGACY_CANDIDATE_STREAM_CSV,
@@ -1419,7 +1420,8 @@ def _records_by_rule_until(
 def _prepare_legacy_live_model_for_anchor(history: pd.DataFrame, anchor_ms: int) -> None:
     global LEGACY_LIVE_MODEL, LEGACY_LIVE_MODEL_TRAINED_AT, LEGACY_LIVE_MODEL_NEXT_UPDATE_MS
     history = history.sort_values("timestamp").reset_index(drop=True)
-    train_df = history[history["timestamp"] < int(anchor_ms)].tail(BACKTEST_TRAIN_WINDOW_MINUTES).copy()
+    train_window_minutes = int(os.getenv("LEGACY_LIVE_TRAIN_WINDOW_MINUTES", str(BACKTEST_TRAIN_WINDOW_MINUTES)))
+    train_df = history[history["timestamp"] < int(anchor_ms)].tail(train_window_minutes).copy()
     if len(train_df) < BACKTEST_MIN_TRAIN_SAMPLES:
         raise RuntimeError(f"legacy live model training samples too few: {len(train_df)}")
     if LEGACY_LIVE_MODEL is not None and LEGACY_LIVE_MODEL_TRAINED_AT == ms_to_beijing_time(int(anchor_ms)):
@@ -1429,7 +1431,11 @@ def _prepare_legacy_live_model_for_anchor(history: pd.DataFrame, anchor_ms: int)
         "[realtime_strategy] training legacy live model: "
         f"anchor={anchor_time}, train_rows={len(train_df)}"
     )
-    LEGACY_LIVE_MODEL = train_validation_model(train_df)
+    if os.getenv("LEGACY_LIVE_MODEL_TYPE", "legacy_dual") == "mtf_extra_trees":
+        train_features = FeaturePipeline().build(train_df)
+        LEGACY_LIVE_MODEL = train_fast_mtf_extra_trees_model(train_features)
+    else:
+        LEGACY_LIVE_MODEL = train_validation_model(train_df)
     LEGACY_LIVE_MODEL_TRAINED_AT = anchor_time
     LEGACY_LIVE_MODEL_NEXT_UPDATE_MS = int(anchor_ms) + int(LEGACY_MODEL_UPDATE_MINUTES) * 60_000
     print(
@@ -1581,6 +1587,7 @@ def run_realtime_strategies(
     feature_pipeline = FeaturePipeline()
     # Match the legacy candidate stream used by the long walk-forward coverage backtest.
     alpha_model = AlphaModelManager(retrain_interval_seconds=int(LEGACY_MODEL_UPDATE_MINUTES) * 60)
+    needs_alpha_model = any(name != "adaptive_rule_switch" for name in names)
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
@@ -1631,11 +1638,14 @@ def run_realtime_strategies(
             if live_chart_window is not None:
                 live_chart_window.update()
 
-            if alpha_model.model is None or alpha_model.last_train_time is None:
+            if not needs_alpha_model:
+                feature_df = feature_pipeline.build(df)
+            elif alpha_model.model is None or alpha_model.last_train_time is None:
                 print("[realtime_strategy] training model")
                 alpha_model.ensure_trained(df)
                 print("[realtime_strategy] model updated")
                 historical_rows = None
+                feature_df = feature_pipeline.build(df, alpha_model.feature_cols)
             elif (
                 datetime.now() - alpha_model.last_train_time
             ).total_seconds() >= alpha_model.retrain_interval_seconds:
@@ -1643,8 +1653,9 @@ def run_realtime_strategies(
                 alpha_model.ensure_trained(df)
                 print("[realtime_strategy] model updated")
                 historical_rows = None
-
-            feature_df = feature_pipeline.build(df, alpha_model.feature_cols)
+                feature_df = feature_pipeline.build(df, alpha_model.feature_cols)
+            else:
+                feature_df = feature_pipeline.build(df, alpha_model.feature_cols)
             if feature_df.empty:
                 print("[realtime_strategy] empty features")
                 if once:
@@ -1673,8 +1684,10 @@ def run_realtime_strategies(
             for _, feature_row in rows_to_process.iterrows():
                 signal_timestamp = int(feature_row["timestamp"])
                 latest = feature_row.to_frame().T
-                latest_features = latest[alpha_model.feature_cols]
-                prediction = alpha_model.predict_one(latest_features)
+                prediction = None
+                if needs_alpha_model:
+                    latest_features = latest[alpha_model.feature_cols]
+                    prediction = alpha_model.predict_one(latest_features)
                 legacy_prediction = None
                 if "adaptive_rule_switch" in names:
                     if LEGACY_LIVE_MODEL is None:
@@ -1687,6 +1700,8 @@ def run_realtime_strategies(
                         )
                         continue
                     legacy_prediction = LEGACY_LIVE_MODEL.predict_one(legacy_latest_features)
+                if prediction is None:
+                    prediction = legacy_prediction
 
                 current_price = float(close_by_timestamp.loc[signal_timestamp])
                 signal_time = ms_to_beijing_time(signal_timestamp)
