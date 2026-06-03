@@ -10,6 +10,7 @@ from core.legacy_candidate_stream import (
     LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV,
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
 )
+from config import LEGACY_MODEL_UPDATE_MINUTES
 from core.rolling_coverage_engine import RollingCoverageConfig, build_window_item, load_candidate_rows
 from data_download import beijing_time_to_ms
 from realtime_strategy_runner import LEGACY_ONLINE_BOOTSTRAP_STATE
@@ -24,8 +25,12 @@ def _failures() -> list[str]:
     failures = []
     if "causal_delay10" not in LEGACY_CANDIDATE_STREAM_CSV.name:
         failures.append(f"default candidate stream is not causal delay10: {LEGACY_CANDIDATE_STREAM_CSV.name}")
+    if "expanded_candidates" not in LEGACY_CANDIDATE_STREAM_CSV.name:
+        failures.append(f"default candidate stream is not expanded candidates: {LEGACY_CANDIDATE_STREAM_CSV.name}")
     if "causal_delay10" not in DEFAULT_COVERAGE_REPORT.name:
         failures.append(f"default coverage report is not causal delay10: {DEFAULT_COVERAGE_REPORT.name}")
+    if "expanded_candidates" not in DEFAULT_COVERAGE_REPORT.name:
+        failures.append(f"default coverage report is not expanded candidates: {DEFAULT_COVERAGE_REPORT.name}")
     if not LEGACY_CANDIDATE_STREAM_CSV.exists():
         failures.append(f"missing static legacy stream: {LEGACY_CANDIDATE_STREAM_CSV}")
         return failures
@@ -40,13 +45,15 @@ def _failures() -> list[str]:
         return failures
 
     static_last = static["timestamp_dt"].max()
-    base_anchor = static_anchors.max()
+    base_anchor = static_anchors.min()
+    last_anchor = static_anchors.max()
     base_anchor_ms = _to_ms(base_anchor)
-    update_ms = 10080 * 60_000
+    update_ms = int(LEGACY_MODEL_UPDATE_MINUTES) * 60_000
 
     print("[parity] static stream:")
     print(f"  path={LEGACY_CANDIDATE_STREAM_CSV}")
-    print(f"  rows={len(static)}, last={static_last}, last_anchor={base_anchor}")
+    print(f"  rows={len(static)}, last={static_last}, first_anchor={base_anchor}, last_anchor={last_anchor}")
+    print(f"  legacy_model_update_minutes={LEGACY_MODEL_UPDATE_MINUTES}")
     print(f"  coverage_report={DEFAULT_COVERAGE_REPORT}")
 
     if not LEGACY_ONLINE_CANDIDATE_STREAM_CSV.exists():
@@ -75,8 +82,16 @@ def _failures() -> list[str]:
         failures.append("online stream has no model_trained_at anchors")
     for anchor in anchors:
         anchor_ms = _to_ms(anchor)
-        if anchor_ms < base_anchor_ms or (anchor_ms - base_anchor_ms) % update_ms != 0:
+        if (anchor_ms - base_anchor_ms) % update_ms != 0:
             failures.append(f"online anchor is off the legacy weekly schedule: {anchor}")
+    sorted_anchor_ms = sorted(_to_ms(anchor) for anchor in anchors)
+    if len(sorted_anchor_ms) >= 2:
+        max_gap_minutes = max(b - a for a, b in zip(sorted_anchor_ms, sorted_anchor_ms[1:])) / 60_000
+        if max_gap_minutes > int(LEGACY_MODEL_UPDATE_MINUTES):
+            failures.append(
+                "online anchor gap exceeds legacy model update schedule: "
+                f"max_gap_minutes={max_gap_minutes:.0f}, update_minutes={LEGACY_MODEL_UPDATE_MINUTES}"
+            )
 
     print("[parity] online stream:")
     print(f"  path={LEGACY_ONLINE_CANDIDATE_STREAM_CSV}")
@@ -105,6 +120,7 @@ def _failures() -> list[str]:
         print("[parity] active rolling coverage window:")
         if item is None:
             print(f"  now={now_dt}, active_window=None")
+            failures.append(f"active rolling coverage window is missing: now={now_dt}")
         else:
             print(f"  now={now_dt}")
             print(f"  window={item.get('window')}")
@@ -113,6 +129,10 @@ def _failures() -> list[str]:
             print(f"  cover_start={item.get('cover_start')}")
             print(f"  cover_end={item.get('cover_end')}")
             print(f"  condition={item.get('condition')}")
+            if not str(item.get("condition") or "").strip():
+                failures.append(
+                    "active rolling coverage condition is empty; realtime adaptive_rule_switch will not pass coverage"
+                )
 
     return failures
 

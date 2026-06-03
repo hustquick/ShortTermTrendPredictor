@@ -9,7 +9,7 @@ from strategies.base import feature_value
 
 
 LEGACY_CANDIDATE_STREAM_CSV = (
-    DATA_DIR / "legacy_recovered_selected_stream_365d_step1_update10080_causal_delay10_from_selected.csv"
+    DATA_DIR / "legacy_recovered_selected_stream_365d_plus_online_causal_delay10_expanded_candidates.csv"
 )
 LEGACY_ONLINE_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_online_candidate_stream.csv"
 LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV = DATA_DIR / "legacy_online_candidate_rule_outcomes.csv"
@@ -62,11 +62,21 @@ def legacy_candidates(features, prediction: dict) -> list[dict]:
     p_up_raw = float(prediction.get("up_probability", 0.5))
     p_up_signal = float(prediction.get("up_signal_probability", 0.0))
     p_down_signal = float(prediction.get("down_signal_probability", 0.0))
+    ret_5 = feature_value(features, "ret_5")
+    ret_10 = feature_value(features, "ret_10")
     ret_30 = feature_value(features, "ret_30")
     macd_hist = feature_value(features, "macd_hist")
+    body_ratio = feature_value(features, "body_ratio")
+    ema_10_30_diff = feature_value(features, "ema_10_30_diff")
+    ema_20_60_diff = feature_value(features, "ema_20_60_diff")
+    rsi_14 = feature_value(features, "rsi_14", 50.0)
     boll_position = feature_value(features, "boll_position", 0.5)
     close_position = feature_value(features, "close_position", 0.5)
-    trend = feature_value(features, "trend_agreement")
+    upper_shadow_ratio = feature_value(features, "upper_shadow_ratio")
+    lower_shadow_ratio = feature_value(features, "lower_shadow_ratio")
+    taker_buy_ratio = feature_value(features, "taker_buy_ratio", 0.5)
+    trend_agreement = feature_value(features, "trend_agreement")
+    direction_edge = p_up_signal - p_down_signal
 
     rules = []
 
@@ -74,6 +84,8 @@ def legacy_candidates(features, prediction: dict) -> list[dict]:
         if ok:
             rules.append({"name": name, "direction": direction, "confidence": float(confidence)})
 
+    # Preserve the original 10m short/long anchors; mined 10m holdout checks show
+    # this short family still contributes most of the high-frequency edge.
     add(p_up_raw <= 0.45, "short_pup_le_045", "down", max(p_down_signal, 1.0 - p_up_raw))
     add(
         p_up_raw <= 0.50 and boll_position > 0.10,
@@ -82,7 +94,7 @@ def legacy_candidates(features, prediction: dict) -> list[dict]:
         max(p_down_signal, 1.0 - p_up_raw),
     )
     add(
-        p_up_raw <= 0.45 and ret_30 <= 0 and trend < 0,
+        p_up_raw <= 0.45 and ret_30 <= 0 and trend_agreement < 0,
         "short_pup_le_045_ret30neg_trenddown",
         "down",
         max(p_down_signal, 1.0 - p_up_raw),
@@ -95,14 +107,241 @@ def legacy_candidates(features, prediction: dict) -> list[dict]:
         max(p_up_signal, p_up_raw),
     )
     add(p_up_raw >= 0.55 and boll_position < 0.85, "long_pup_ge_055_not_high", "up", max(p_up_signal, p_up_raw))
+
+    add(
+        p_up_raw <= 0.35 and p_up_signal >= 0.95 and ret_5 > 0.0,
+        "m10_short_lowpup_conf95_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.35 and p_up_signal >= 0.98 and ret_5 > 0.0,
+        "m10_short_lowpup_conf98_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.35 and p_up_signal >= 0.99 and ret_5 > 0.0,
+        "m10_short_lowpup_conf99_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.35 and body_ratio <= 0.20 and ret_5 > 0.0,
+        "m10_short_lowpup_body20_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.20 and body_ratio <= 0.20 and ret_5 > 0.0,
+        "m10_short_pup20_body20_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.10 and body_ratio <= 0.20 and ret_5 > 0.0,
+        "m10_short_pup10_body20_ret5pos",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.35 and p_up_signal >= 0.95 and lower_shadow_ratio > 0.50,
+        "m10_short_lowpup_conf95_lshadow50",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.35 and p_up_signal >= 0.95 and lower_shadow_ratio > 0.70,
+        "m10_short_lowpup_conf95_lshadow70",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+
+    add(
+        p_up_raw > 0.70 and ema_20_60_diff <= -0.003 and rsi_14 <= 47.5 and lower_shadow_ratio <= 0.30,
+        "m10_long_ema60neg_rsi47_lshadow30",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_up_signal > 0.95 and ema_20_60_diff <= -0.002 and close_position > 0.01 and body_ratio <= 0.70,
+        "m10_long_upmodel95_ema60neg_close_body70",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_down_signal <= 0.02 and ema_20_60_diff <= -0.002 and macd_hist <= 5 and upper_shadow_ratio > 0.0,
+        "m10_long_lowdown_ema60neg_macd5_ushadow",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_down_signal <= 0.01 and direction_edge <= 0.90 and ret_10 > -0.001 and taker_buy_ratio > 0.20,
+        "m10_short_lowdown_edge90_ret10_taker20",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        ret_5 <= -0.003 and upper_shadow_ratio > 0.10 and lower_shadow_ratio > 0.0 and lower_shadow_ratio <= 0.70,
+        "m10_long_ret5drop_ushadow_lshadow",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_up_raw > 0.90 and macd_hist <= -30 and lower_shadow_ratio > 0.10,
+        "m10_long_pup90_macddeep_lshadow",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_up_raw <= 0.65 and p_down_signal <= 0.075 and upper_shadow_ratio <= 0.01 and taker_buy_ratio <= 0.90,
+        "m10_short_pup65_lowdown_ushadow01_taker90",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        direction_edge <= -0.95 and ret_5 <= 0 and taker_buy_ratio > 0.45,
+        "m10_short_edgeneg95_ret5_taker45",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        direction_edge > 0.95 and ema_20_60_diff <= -0.001 and rsi_14 <= 35 and trend_agreement <= -0.333333,
+        "m10_long_edge95_ema60neg_rsi35_trendneg",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_up_signal <= 0.05 and direction_edge > -0.10 and ret_30 > -0.0005 and close_position > 0.0,
+        "m10_short_lowup_edge_recover_close",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        direction_edge <= -0.95 and macd_hist <= 0 and body_ratio > 0.80 and upper_shadow_ratio <= 0.10,
+        "m10_short_edgeneg95_macd_body_ushadow",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_signal <= 0.95 and p_down_signal <= 0.01 and ema_20_60_diff > -0.002 and ema_20_60_diff <= -0.0005,
+        "m10_short_lowdown_ema60_midneg",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        macd_hist <= -30 and close_position > 0.20 and upper_shadow_ratio > 0.20,
+        "m10_long_macddeep_close_ushadow",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        rsi_14 <= 15 and close_position > 0.70 and body_ratio > 0.05,
+        "m10_long_rsi15_close70_body",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        direction_edge <= -0.95 and ret_10 > 0 and macd_hist <= 5 and taker_buy_ratio <= 0.90,
+        "m10_short_edgeneg95_ret10pos_macd5",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_raw > 0.90 and direction_edge <= 0.30 and ret_30 <= 0.001,
+        "m10_long_pup90_edge30_ret30low",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        ret_10 <= 0.001 and rsi_14 > 85 and lower_shadow_ratio <= 0.50 and taker_buy_ratio <= 0.90,
+        "m10_short_rsi85_ret10_lshadow",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        direction_edge <= 0.30 and ema_10_30_diff <= -0.002 and taker_buy_ratio <= 0.80,
+        "m10_short_edge30_ema30neg_taker80",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_up_signal > 0.50 and ema_20_60_diff <= -0.003 and upper_shadow_ratio <= 0.10,
+        "m10_long_upmodel50_ema60neg_ushadow10",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        ret_10 > 0.003 and ret_30 <= 0.0005 and lower_shadow_ratio > 0.0,
+        "m10_short_ret10surge_ret30flat_lshadow",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        p_down_signal <= 0.01 and macd_hist <= 0 and lower_shadow_ratio <= 0.02,
+        "m10_short_lowdown_macd_lshadow02",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        ret_10 > 0.003 and rsi_14 <= 65 and close_position <= 0.90,
+        "m10_short_ret10surge_rsi65_close90",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        ret_30 > 0.006 and upper_shadow_ratio > 0.20 and taker_buy_ratio > 0.55,
+        "m10_long_ret30strong_ushadow_taker55",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_down_signal > 0.95 and ret_5 > 0.001 and lower_shadow_ratio <= 0.01,
+        "m10_short_downmodel95_ret5_lshadow01",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        ret_30 <= -0.004 and ema_20_60_diff > -0.0005 and body_ratio > 0.20,
+        "m10_long_ret30drop_ema60_recover_body",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        close_position > 0.70 and taker_buy_ratio <= 0.05,
+        "m10_short_close70_taker05",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        rsi_14 <= 15 and close_position > 0.50 and taker_buy_ratio <= 0.40,
+        "m10_long_rsi15_close50_taker40",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_down_signal > 0.90 and ret_10 > 0.003 and ret_30 <= 0.008,
+        "m10_short_downmodel90_ret10_ret30cap",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
+    add(
+        ret_30 > 0.004 and rsi_14 <= 55 and taker_buy_ratio > 0.45,
+        "m10_long_ret30pos_rsi55_taker45",
+        "up",
+        max(p_up_signal, p_up_raw),
+    )
+    add(
+        p_up_signal <= 0.03 and body_ratio <= 0.05 and upper_shadow_ratio <= 0.90,
+        "m10_short_lowup_body05_ushadow90",
+        "down",
+        max(p_down_signal, 1.0 - p_up_raw),
+    )
     return rules
 
 
 def legacy_state_ok(features, prediction: dict, direction: str) -> bool:
-    p_up_raw = float(prediction.get("up_probability", 0.5))
-    rsi_14 = feature_value(features, "rsi_14", 50.0)
-    ret_30 = feature_value(features, "ret_30")
-    return direction == "down" and p_up_raw <= 0.285 and rsi_14 > 47.5 and ret_30 > -0.00013
+    return direction in {"up", "down"}
 
 
 def _stats(records: deque[bool]) -> tuple[int, int, float]:

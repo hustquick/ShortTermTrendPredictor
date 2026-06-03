@@ -8,6 +8,7 @@ from core.legacy_candidate_stream import (
     LEGACY_CANDIDATE_STREAM_CSV,
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
     LegacyCandidateStreamGenerator,
+    legacy_candidates,
 )
 from core.rolling_coverage_engine import (
     RollingCoverageConfig,
@@ -21,7 +22,7 @@ from strategies.rules import _adaptive_feature_context
 
 
 DEFAULT_COVERAGE_REPORT = (
-    DATA_DIR / "rolling_coverage_365d_step1_update10080_train30_cover7_min5_causal_delay10_from_selected.csv"
+    DATA_DIR / "rolling_coverage_365d_plus_online_train30_cover7_min10_causal_delay10_expanded_candidates.csv"
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 DEFAULT_CANDIDATE_STREAM = LEGACY_CANDIDATE_STREAM_CSV
@@ -239,43 +240,10 @@ class LegacyAdaptiveCoverageGate:
 
     @staticmethod
     def _legacy_candidates(features, prediction: dict) -> list[dict]:
-        p_up_raw = float(prediction.get("up_probability", 0.5))
-        p_up_signal = float(prediction.get("up_signal_probability", 0.0))
-        p_down_signal = float(prediction.get("down_signal_probability", 0.0))
-        ret_30 = feature_value(features, "ret_30")
-        macd_hist = feature_value(features, "macd_hist")
-        boll_position = feature_value(features, "boll_position", 0.5)
-        close_position = feature_value(features, "close_position", 0.5)
-        trend = feature_value(features, "trend_agreement")
-
-        rules = []
-
-        def add(ok: bool, name: str, direction: str, confidence: float) -> None:
-            if ok:
-                rules.append({"rule": name, "direction": direction, "confidence": float(confidence)})
-
-        add(p_up_raw <= 0.45, "short_pup_le_045", "down", max(p_down_signal, 1.0 - p_up_raw))
-        add(
-            p_up_raw <= 0.50 and boll_position > 0.10,
-            "short_pup_le_050_not_low",
-            "down",
-            max(p_down_signal, 1.0 - p_up_raw),
-        )
-        add(
-            p_up_raw <= 0.45 and ret_30 <= 0 and trend < 0,
-            "short_pup_le_045_ret30neg_trenddown",
-            "down",
-            max(p_down_signal, 1.0 - p_up_raw),
-        )
-        add(p_up_raw >= 0.98 and boll_position < 0.85, "long_pup_ge_098_not_high", "up", max(p_up_signal, p_up_raw))
-        add(
-            p_up_raw >= 0.85 and ret_30 >= 0 and macd_hist <= 0 and close_position < 0.95,
-            "long_pup_ge_085_ret30pos_macdneg_closeok",
-            "up",
-            max(p_up_signal, p_up_raw),
-        )
-        add(p_up_raw >= 0.55 and boll_position < 0.85, "long_pup_ge_055_not_high", "up", max(p_up_signal, p_up_raw))
-        return rules
+        return [
+            {"rule": item["name"], "direction": item["direction"], "confidence": item["confidence"]}
+            for item in legacy_candidates(features, prediction)
+        ]
 
     @staticmethod
     def _session(timestamp_ms: float) -> str:

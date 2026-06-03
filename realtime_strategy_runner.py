@@ -34,6 +34,7 @@ from config import (
     KRONOS_NOTIFY_MIN_CONFIDENCE,
     KRONOS_RUN_MIN_CONFIDENCE,
     KRONOS_RUN_MIN_EDGE,
+    LEGACY_MODEL_UPDATE_MINUTES,
     OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST,
     OFFICIAL_SIGNALS_CSV,
     PREDICT_HORIZON_MINUTES,
@@ -1316,12 +1317,18 @@ def _legacy_static_metadata() -> dict:
     return {
         "last_timestamp": df["timestamp_dt"].max(),
         "last_timestamp_ms": _timestamp_to_ms(df["timestamp_dt"].max()),
+        "first_anchor": anchors.min(),
+        "first_anchor_ms": _timestamp_to_ms(anchors.min()),
         "last_anchor": anchors.max(),
         "last_anchor_ms": _timestamp_to_ms(anchors.max()),
     }
 
 
-def _expected_legacy_anchor_ms(point_ms: int, base_anchor_ms: int, update_minutes: int = 10080) -> int:
+def _expected_legacy_anchor_ms(
+    point_ms: int,
+    base_anchor_ms: int,
+    update_minutes: int = LEGACY_MODEL_UPDATE_MINUTES,
+) -> int:
     update_ms = int(update_minutes) * 60_000
     if point_ms < base_anchor_ms:
         return base_anchor_ms
@@ -1353,14 +1360,22 @@ def _online_stream_needs_rebuild(static_meta: dict) -> tuple[bool, str]:
     anchors = df["anchor_dt"].dropna().drop_duplicates()
     if anchors.empty:
         return True, "online_stream_has_no_model_anchor"
-    base_anchor_ms = int(static_meta["last_anchor_ms"])
-    update_ms = 10080 * 60_000
+    base_anchor_ms = int(static_meta.get("first_anchor_ms", static_meta["last_anchor_ms"]))
+    update_ms = int(LEGACY_MODEL_UPDATE_MINUTES) * 60_000
     for anchor in anchors:
         anchor_ms = _timestamp_to_ms(anchor)
-        if anchor_ms < base_anchor_ms or (anchor_ms - base_anchor_ms) % update_ms != 0:
+        if (anchor_ms - base_anchor_ms) % update_ms != 0:
             return True, (
                 "online_stream_anchor_not_on_legacy_schedule:"
-                f"base={static_meta['last_anchor']}, online_anchor={anchor}"
+                f"base={static_meta.get('first_anchor', static_meta['last_anchor'])}, online_anchor={anchor}"
+            )
+    sorted_anchors = sorted(_timestamp_to_ms(anchor) for anchor in anchors)
+    if len(sorted_anchors) >= 2:
+        max_gap_ms = max(b - a for a, b in zip(sorted_anchors, sorted_anchors[1:]))
+        if max_gap_ms > update_ms:
+            return True, (
+                "online_stream_anchor_gap_exceeds_legacy_schedule:"
+                f"max_gap_minutes={max_gap_ms / 60_000:.0f}, update_minutes={LEGACY_MODEL_UPDATE_MINUTES}"
             )
     return False, "online_stream_continuous"
 
@@ -1416,7 +1431,7 @@ def _prepare_legacy_live_model_for_anchor(history: pd.DataFrame, anchor_ms: int)
     )
     LEGACY_LIVE_MODEL = train_validation_model(train_df)
     LEGACY_LIVE_MODEL_TRAINED_AT = anchor_time
-    LEGACY_LIVE_MODEL_NEXT_UPDATE_MS = int(anchor_ms) + 10080 * 60_000
+    LEGACY_LIVE_MODEL_NEXT_UPDATE_MS = int(anchor_ms) + int(LEGACY_MODEL_UPDATE_MINUTES) * 60_000
     print(
         "[realtime_strategy] legacy live model ready: "
         f"trained_at={LEGACY_LIVE_MODEL_TRAINED_AT}, "
@@ -1517,7 +1532,7 @@ def _bootstrap_legacy_online_candidate_stream(now_ms: int, update_cache: bool) -
         end_ms=target_ms,
         model_anchor_ms=int(static_meta["last_anchor_ms"]),
         step_minutes=1,
-        model_update_minutes=10080,
+        model_update_minutes=LEGACY_MODEL_UPDATE_MINUTES,
         train_window_minutes=BACKTEST_TRAIN_WINDOW_MINUTES,
         output=LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
         progress_every_steps=1000,
@@ -1565,7 +1580,7 @@ def run_realtime_strategies(
     data_feed = RealtimeDataFeed(minutes=train_minutes, update_cache=update_cache)
     feature_pipeline = FeaturePipeline()
     # Match the legacy candidate stream used by the long walk-forward coverage backtest.
-    alpha_model = AlphaModelManager(retrain_interval_seconds=10080 * 60)
+    alpha_model = AlphaModelManager(retrain_interval_seconds=int(LEGACY_MODEL_UPDATE_MINUTES) * 60)
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
