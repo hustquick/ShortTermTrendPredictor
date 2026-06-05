@@ -1464,6 +1464,11 @@ def _bootstrap_legacy_online_candidate_stream(now_ms: int, update_cache: bool) -
     try:
         static_meta = _legacy_static_metadata()
     except FileNotFoundError as exc:
+        history = get_recent_klines_with_cache(
+            minutes=BACKTEST_TRAIN_WINDOW_MINUTES + PREDICT_HORIZON_MINUTES + 5,
+            update_if_needed=update_cache,
+        )
+        _prepare_legacy_live_model_for_anchor(history, int(now_ms))
         print(
             "[realtime_strategy] legacy candidate stream not found; "
             "skip legacy online bootstrap and rely on active stable coverage: "
