@@ -1461,7 +1461,16 @@ def _bootstrap_legacy_online_candidate_stream(now_ms: int, update_cache: bool) -
     ):
         return
 
-    static_meta = _legacy_static_metadata()
+    try:
+        static_meta = _legacy_static_metadata()
+    except FileNotFoundError as exc:
+        print(
+            "[realtime_strategy] legacy candidate stream not found; "
+            "skip legacy online bootstrap and rely on active stable coverage: "
+            f"{exc}"
+        )
+        LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = True
+        return
     target_ms = int(now_ms) - PREDICT_HORIZON_MINUTES * 60_000
     target_dt = pd.to_datetime(ms_to_beijing_time(target_ms))
     bootstrapped_target = _latest_bootstrap_target()
