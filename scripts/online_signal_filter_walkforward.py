@@ -144,7 +144,7 @@ def _build_conditions(df: pd.DataFrame) -> list[tuple[str, np.ndarray]]:
     return conditions
 
 
-def _search_best_condition(
+def _search_ranked_conditions(
     train: pd.DataFrame,
     max_clauses: int,
     min_samples: int,
@@ -152,14 +152,15 @@ def _search_best_condition(
     min_win_rate: float,
     min_wilson_lower: float,
     beam_size: int,
-) -> dict | None:
+    limit: int = 20,
+) -> list[dict]:
     days = max((train["timestamp_dt"].max() - train["timestamp_dt"].min()).total_seconds() / 86_400, 1e-9)
     min_count = max(min_samples, math.ceil(days * min_signals_per_day))
     if len(train) < min_count:
-        return None
+        return []
     conditions = _build_conditions(train)
     correct = train["correct_bool"].to_numpy()
-    best: tuple[tuple[float, float, int, int], dict] | None = None
+    ranked: dict[str, tuple[tuple[float, float, int, int], dict]] = {}
     beam: list[tuple[tuple[int, ...], list[str], np.ndarray, dict]] = []
 
     def score_mask(names: list[str], mask: np.ndarray) -> dict | None:
@@ -186,6 +187,18 @@ def _search_best_condition(
             -clause_count,
         )
 
+    def add_ranked(candidate: dict, clause_count: int) -> None:
+        if (
+            candidate["train_win_rate"] < min_win_rate
+            or candidate["train_wilson_lower"] < min_wilson_lower
+        ):
+            return
+        key = sort_key(candidate, clause_count)
+        condition = candidate["condition"]
+        existing = ranked.get(condition)
+        if existing is None or key > existing[0]:
+            ranked[condition] = (key, candidate)
+
     for idx, (name, mask) in enumerate(conditions):
         count = int(mask.sum())
         if count >= min_count:
@@ -196,13 +209,7 @@ def _search_best_condition(
                 if candidate is None:
                     continue
                 beam.append(((idx,), [name], mask, candidate))
-                if (
-                    candidate["train_win_rate"] >= min_win_rate
-                    and candidate["train_wilson_lower"] >= min_wilson_lower
-                ):
-                    key = sort_key(candidate, 1)
-                    if best is None or key > best[0]:
-                        best = (key, candidate)
+                add_ranked(candidate, 1)
 
     beam = sorted(
         beam,
@@ -225,14 +232,7 @@ def _search_best_condition(
                 if candidate is None:
                     continue
                 next_beam.append((combo_indices, [*names, name], combo_mask, candidate))
-                if (
-                    candidate["train_win_rate"] < min_win_rate
-                    or candidate["train_wilson_lower"] < min_wilson_lower
-                ):
-                    continue
-                key = sort_key(candidate, clause_count)
-                if best is None or key > best[0]:
-                    best = (key, candidate)
+                add_ranked(candidate, clause_count)
         if not next_beam:
             break
         beam = sorted(
@@ -240,7 +240,32 @@ def _search_best_condition(
             key=lambda item: sort_key(item[3], len(item[0])),
             reverse=True,
         )[:beam_size]
-    return None if best is None else best[1]
+    return [
+        item
+        for _, item in sorted(ranked.values(), key=lambda row: row[0], reverse=True)[:limit]
+    ]
+
+
+def _search_best_condition(
+    train: pd.DataFrame,
+    max_clauses: int,
+    min_samples: int,
+    min_signals_per_day: float,
+    min_win_rate: float,
+    min_wilson_lower: float,
+    beam_size: int,
+) -> dict | None:
+    ranked = _search_ranked_conditions(
+        train,
+        max_clauses=max_clauses,
+        min_samples=min_samples,
+        min_signals_per_day=min_signals_per_day,
+        min_win_rate=min_win_rate,
+        min_wilson_lower=min_wilson_lower,
+        beam_size=beam_size,
+        limit=1,
+    )
+    return ranked[0] if ranked else None
 
 
 def _apply_condition(df: pd.DataFrame, condition: str) -> pd.Series:

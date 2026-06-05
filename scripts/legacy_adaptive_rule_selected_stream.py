@@ -18,6 +18,7 @@ from core.feature_pipeline import FeaturePipeline
 from core.fast_mtf_model import train_fast_mtf_extra_trees_model
 from core.legacy_adaptive_coverage_gate import FEATURE_COLUMNS
 from core.legacy_candidate_stream import (
+    LEGACY_CANDIDATE_STREAM_COLUMNS,
     _active_candidate as legacy_active_candidate,
     legacy_candidates,
     legacy_state_ok,
@@ -188,6 +189,7 @@ def build_stream_from_predictions(
 
     out = pd.DataFrame(rows)
     output.parent.mkdir(parents=True, exist_ok=True)
+    out = out.reindex(columns=LEGACY_CANDIDATE_STREAM_COLUMNS)
     out.to_csv(output, index=False)
     if rule_outcome_output is not None:
         rule_outcome_output.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +564,7 @@ def build_stream_window(
 
     out = pd.DataFrame(rows)
     output.parent.mkdir(parents=True, exist_ok=True)
+    out = out.reindex(columns=LEGACY_CANDIDATE_STREAM_COLUMNS)
     if append and output.exists():
         out.to_csv(output, index=False, mode="a", header=False)
     else:

@@ -5,19 +5,25 @@ from pathlib import Path
 import pandas as pd
 
 from config import DATA_DIR
+from config import PREDICT_HORIZON_MINUTES
+from core.feature_pipeline import FeaturePipeline
 from core.legacy_candidate_stream import (
     LEGACY_CANDIDATE_STREAM_CSV,
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
     LegacyCandidateStreamGenerator,
     legacy_candidates,
 )
+from data_download import load_history_csv
 from core.rolling_coverage_engine import (
     RollingCoverageConfig,
     build_window_item,
+    build_window_items,
     load_candidate_rows,
     matches_condition,
 )
 from data_download import ms_to_beijing_time
+from scripts.direct_feature_signal_stream import FEATURE_EXPORT_COLUMNS
+from scripts.stable_rule_generator_walkforward import _discover_stable_rules
 from strategies.base import feature_value
 from strategies.rules import _adaptive_feature_context
 
@@ -30,6 +36,12 @@ DEFAULT_COVERAGE_REPORT = (
 )
 DEFAULT_VALIDATED_SIGNALS = DATA_DIR / "validated_strategy_signals.csv"
 DEFAULT_CANDIDATE_STREAM = LEGACY_CANDIDATE_STREAM_CSV
+ACTIVE_ORDERFLOW_RULE_ENABLED = os.getenv("ACTIVE_ORDERFLOW_RULE_ENABLED", "1").lower() not in {"0", "false", "no"}
+ACTIVE_ORDERFLOW_RULE_CONDITION = "direction=down & mtf_3m_volume_ratio_5>2.0"
+ACTIVE_STABLE_RULE_NAME = "active_stable_rule_generator"
+ACTIVE_STABLE_RULE_CONFIDENCE = float(os.getenv("ACTIVE_STABLE_RULE_CONFIDENCE", "0.82"))
+ACTIVE_STABLE_REDISCOVER_INTERVAL_MS = int(os.getenv("ACTIVE_STABLE_REDISCOVER_INTERVAL_MINUTES", "15")) * 60_000
+ACTIVE_STABLE_COVER_MS = int(os.getenv("ACTIVE_STABLE_COVER_MINUTES", "60")) * 60_000
 FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -91,15 +103,15 @@ class LegacyAdaptiveCoverageGate:
         candidate_stream_path: Path | None = None,
         enabled: bool = True,
         online_rediscovery_enabled: bool = True,
-        rediscover_interval_minutes: int = 30,
-        train_days: int = 30,
-        max_clauses: int = 3,
-        min_samples: int = 60,
-        min_signals_per_day: float = 5.0,
-        min_win_rate: float = 0.75,
-        min_wilson_lower: float = 0.68,
+        rediscover_interval_minutes: int = 10,
+        train_days: int = 3,
+        max_clauses: int = 2,
+        min_samples: int = 10,
+        min_signals_per_day: float = 1.0,
+        min_win_rate: float = 0.65,
+        min_wilson_lower: float = 0.35,
         beam_size: int = 120,
-        cover_days: int = 7,
+        cover_days: int = 1,
         offline_latest_windows: int = 1,
     ):
         self.report_path = report_path or DEFAULT_COVERAGE_REPORT
@@ -134,6 +146,8 @@ class LegacyAdaptiveCoverageGate:
         self._active_window_key: tuple[int, str] | None = None
         self._last_rediscover_ms = 0
         self._candidate_stream = LegacyCandidateStreamGenerator()
+        self._active_stable_conditions: list[dict] = []
+        self._last_stable_rediscover_ms = 0
 
     def _load(self) -> None:
         if self._loaded:
@@ -252,21 +266,28 @@ class LegacyAdaptiveCoverageGate:
         if df.empty:
             return
         now_dt = self._now_dt(now_ms)
-        item = build_window_item(
+        items = build_window_items(
             df,
             now_dt,
             self._coverage_config,
             source="online_rolling_coverage",
+            limit=5,
+            recent_lookback_days=1,
+            recent_min_matches=3,
+            recent_min_win_rate=self.min_win_rate,
         )
-        if item is None or not item.get("condition"):
+        if not items:
             self._online_conditions = []
-            self._active_window_key = None
+            self._active_window_key = (-1, "no_recent_quality_coverage")
             return
-        key = (int(item.get("window", 0)), str(item.get("condition", "")))
+        key = (
+            int(items[0].get("window", 0)),
+            "|".join(str(item.get("condition", "")) for item in items),
+        )
         if self._active_window_key == key:
             return
         self._active_window_key = key
-        self._online_conditions = [item]
+        self._online_conditions = items
 
     @staticmethod
     def _legacy_candidates(features, prediction: dict) -> list[dict]:
@@ -318,15 +339,201 @@ class LegacyAdaptiveCoverageGate:
     def _active_conditions(self, now_ms: int) -> list[dict]:
         if self._online_conditions and self._active_condition_is_current(self._online_conditions[0], now_ms):
             return self._online_conditions
+        if self.online_rediscovery_enabled and self._active_window_key is not None and not self._online_conditions:
+            return []
         return [item for item in self._offline_conditions if self._active_condition_is_current(item, now_ms)]
 
     @staticmethod
     def _matches(condition: str, row: dict) -> bool:
         return matches_condition(condition, row)
 
+    @staticmethod
+    def _direction_from_condition(condition: str) -> str:
+        for part in str(condition).split("&"):
+            item = part.strip()
+            if item == "direction=up":
+                return "up"
+            if item == "direction=down":
+                return "down"
+        return "no_trade"
+
+    def _active_stable_decision(self, features, now_ms: int) -> LegacyCoverageDecision | None:
+        if not ACTIVE_ORDERFLOW_RULE_ENABLED:
+            return None
+        self._maybe_rediscover_active_stable(now_ms)
+        if not self._active_stable_conditions:
+            return None
+        matched_item = None
+        matched_direction = "no_trade"
+        for item in self._active_stable_conditions:
+            cover_start_ms = int(item.get("cover_start_ms", 0) or 0)
+            cover_end_ms = int(item.get("cover_end_ms", 0) or 0)
+            if not (cover_start_ms <= now_ms < cover_end_ms):
+                continue
+            condition = str(item.get("condition", ""))
+            direction = self._direction_from_condition(condition)
+            directions = (direction,) if direction in {"up", "down"} else ("up", "down")
+            for candidate_direction in directions:
+                row = {
+                    "rule": ACTIVE_STABLE_RULE_NAME,
+                    "direction": candidate_direction,
+                    "session": self._session(now_ms),
+                    "adaptive_context": _adaptive_feature_context(features, {"up_probability": 0.5}),
+                    "up_probability": 1.0 if candidate_direction == "up" else 0.0,
+                    "confidence": ACTIVE_STABLE_RULE_CONFIDENCE,
+                }
+                for column in FEATURE_COLUMNS:
+                    row[column] = feature_value(features, column)
+                if condition and self._matches(condition, row):
+                    matched_item = item
+                    matched_direction = candidate_direction
+                    break
+            if matched_item is not None:
+                break
+        if matched_item is None:
+            return None
+        condition = str(matched_item.get("condition", ACTIVE_ORDERFLOW_RULE_CONDITION))
+        reason = (
+            "legacy_coverage_gate=pass;"
+            f"legacy_rule={ACTIVE_STABLE_RULE_NAME};"
+            f"legacy_condition={condition};"
+            "legacy_source=active_stable_rule_generator;"
+            "legacy_report=stable_rule_generator_walkforward_current;"
+            f"legacy_window=rolling_1h_active_until_{matched_item.get('cover_end', '')};"
+            f"legacy_family={matched_item.get('family', '')};"
+            f"legacy_train_win_rate={matched_item.get('train_win_rate', '')};"
+            f"legacy_train_wilson_lower={matched_item.get('train_wilson_lower', '')};"
+            f"legacy_select_win_rate={matched_item.get('select_win_rate', '')};"
+            f"legacy_select_samples={matched_item.get('select_samples', '')}"
+        )
+        return LegacyCoverageDecision(
+            True,
+            matched_direction,
+            ACTIVE_STABLE_RULE_CONFIDENCE,
+            ACTIVE_STABLE_RULE_NAME,
+            condition,
+            reason,
+        )
+
+    def _direct_feature_candidate_rows(self) -> pd.DataFrame:
+        required_minutes = 3 * 24 * 60 + 6 * 60 + 360 + PREDICT_HORIZON_MINUTES + 30
+        raw = load_history_csv().sort_values("timestamp").reset_index(drop=True)
+        if raw.empty:
+            return pd.DataFrame()
+        required_start = int(raw["timestamp"].max()) - required_minutes * 60_000
+        raw = raw[raw["timestamp"] >= required_start].copy().reset_index(drop=True)
+        features = FeaturePipeline().build(raw)
+        close_by_timestamp = raw.set_index("timestamp")["close"]
+        features["future_price"] = (
+            features["timestamp"] + PREDICT_HORIZON_MINUTES * 60_000
+        ).map(close_by_timestamp)
+        features["future_return"] = features["future_price"] / features["close"] - 1
+        features = features.dropna(subset=["future_return", *FEATURE_EXPORT_COLUMNS]).copy()
+        rows = []
+        for _, source in features.iterrows():
+            actual_direction = "up" if float(source["future_return"]) > 0 else "down"
+            base = {
+                "timestamp": ms_to_beijing_time(int(source["timestamp"])),
+                "timestamp_dt": pd.to_datetime(ms_to_beijing_time(int(source["timestamp"]))),
+                "rule": "direct_feature",
+                "session": self._session(int(source["timestamp"])),
+                "correct_bool": False,
+            }
+            for column in FEATURE_EXPORT_COLUMNS:
+                base[column] = source.get(column)
+            for direction in ("up", "down"):
+                rows.append(
+                    {
+                        **base,
+                        "direction": direction,
+                        "correct_bool": direction == actual_direction,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def _maybe_rediscover_active_stable(self, now_ms: int) -> None:
+        if self._active_stable_conditions:
+            first = self._active_stable_conditions[0]
+            if int(first.get("cover_start_ms", 0) or 0) <= now_ms < int(first.get("cover_end_ms", 0) or 0):
+                return
+        if (
+            self._last_stable_rediscover_ms
+            and now_ms - self._last_stable_rediscover_ms < ACTIVE_STABLE_REDISCOVER_INTERVAL_MS
+        ):
+            return
+        self._last_stable_rediscover_ms = now_ms
+        candidates = self._direct_feature_candidate_rows()
+        if candidates.empty:
+            self._active_stable_conditions = []
+            return
+        anchor = candidates["timestamp_dt"].max()
+        selected: list[dict] = []
+        for family in ("orderflow", "mtf", "reversal", "trend"):
+            for train_days in (1, 2, 3):
+                for select_hours in (3, 6, 12):
+                    select_start = anchor - pd.Timedelta(hours=select_hours)
+                    train_start = select_start - pd.Timedelta(days=train_days)
+                    selected.extend(
+                        _discover_stable_rules(
+                            candidates,
+                            train_start=train_start,
+                            train_end=select_start,
+                            select_start=select_start,
+                            select_end=anchor,
+                            train_days=train_days,
+                            max_clauses=2,
+                            min_train_samples=15,
+                            min_train_wr=0.62,
+                            min_train_wilson=0.42,
+                            train_subwindows=2,
+                            min_subwindow_samples=4,
+                            min_subwindow_wr=0.54,
+                            min_select_samples=4,
+                            min_select_wr=0.62,
+                            min_select_wilson=0.15,
+                            beam_size=80,
+                            candidate_limit=80,
+                            selected_limit=3,
+                            family=family,
+                        )
+                    )
+        deduped = []
+        seen = set()
+        for item in sorted(
+            selected,
+            key=lambda row: (
+                row.get("train_min_subwindow_win_rate", 0),
+                row.get("select_wilson", 0),
+                row.get("select_win_rate", 0),
+                row.get("train_wilson_lower", 0),
+            ),
+            reverse=True,
+        ):
+            condition = str(item.get("condition", ""))
+            if not condition or condition in seen:
+                continue
+            seen.add(condition)
+            cover_start = pd.to_datetime(ms_to_beijing_time(now_ms))
+            cover_end = cover_start + pd.Timedelta(milliseconds=ACTIVE_STABLE_COVER_MS)
+            deduped.append(
+                {
+                    **item,
+                    "cover_start": str(cover_start),
+                    "cover_end": str(cover_end),
+                    "cover_start_ms": int(now_ms),
+                    "cover_end_ms": int(now_ms + ACTIVE_STABLE_COVER_MS),
+                }
+            )
+            if len(deduped) >= 5:
+                break
+        self._active_stable_conditions = deduped
+
     def decide(self, features, prediction: dict) -> LegacyCoverageDecision:
         self._load()
         now_ms = int(feature_value(features, "timestamp", 0.0))
+        active_stable = self._active_stable_decision(features, now_ms)
+        if active_stable is not None:
+            return active_stable
         self._maybe_rediscover(now_ms)
         if not self.enabled:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_gate_disabled")

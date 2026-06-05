@@ -7,6 +7,7 @@ from scripts.online_signal_filter_walkforward import (
     _apply_condition,
     _load_rows,
     _search_best_condition,
+    _search_ranked_conditions,
 )
 
 
@@ -92,6 +93,62 @@ def discover_window_condition(
     )
 
 
+def discover_window_conditions(
+    df: pd.DataFrame,
+    cover_start: pd.Timestamp,
+    config: RollingCoverageConfig,
+    *,
+    limit: int = 10,
+    recent_start: pd.Timestamp | None = None,
+    recent_min_matches: int = 0,
+    recent_min_win_rate: float | None = None,
+) -> list[dict]:
+    train_start = cover_start - pd.Timedelta(days=config.train_days)
+    train = df[(df["timestamp_dt"] >= train_start) & (df["timestamp_dt"] < cover_start)].copy()
+    if train.empty:
+        return []
+    ranked = _search_ranked_conditions(
+        train,
+        max_clauses=config.max_clauses,
+        min_samples=config.min_samples,
+        min_signals_per_day=config.min_signals_per_day,
+        min_win_rate=config.min_win_rate,
+        min_wilson_lower=config.min_wilson_lower,
+        beam_size=config.beam_size,
+        limit=max(limit * 20, limit),
+    )
+    if not ranked:
+        return []
+    if recent_start is None or recent_min_matches <= 0:
+        return ranked[:limit]
+
+    recent = df[df["timestamp_dt"] >= recent_start].copy()
+    if recent.empty:
+        return []
+    selected: list[dict] = []
+    for item in ranked:
+        mask = _apply_condition(recent, item["condition"])
+        matches = int(mask.sum())
+        if matches < recent_min_matches:
+            continue
+        wins = int(recent.loc[mask, "correct_bool"].sum())
+        win_rate = wins / matches if matches else 0.0
+        if recent_min_win_rate is not None and win_rate < recent_min_win_rate:
+            continue
+        selected.append(
+            {
+                **item,
+                "recent_start": str(recent_start),
+                "recent_matches": matches,
+                "recent_wins": wins,
+                "recent_win_rate": win_rate,
+            }
+        )
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def build_window_item(
     df: pd.DataFrame,
     now_dt: pd.Timestamp,
@@ -122,6 +179,47 @@ def build_window_item(
         "cover_start": str(cover_start),
         "cover_end": str(cover_end),
     }
+
+
+def build_window_items(
+    df: pd.DataFrame,
+    now_dt: pd.Timestamp,
+    config: RollingCoverageConfig,
+    source: str,
+    *,
+    limit: int = 10,
+    recent_lookback_days: float | None = None,
+    recent_min_matches: int = 0,
+    recent_min_win_rate: float | None = None,
+) -> list[dict]:
+    bounds = active_window_bounds(df, now_dt, config)
+    if bounds is None:
+        return []
+    window_no, train_start, cover_start, cover_end = bounds
+    recent_start = None
+    if recent_lookback_days is not None and recent_lookback_days > 0:
+        recent_start = now_dt - pd.Timedelta(days=float(recent_lookback_days))
+    selected = discover_window_conditions(
+        df,
+        cover_start,
+        config,
+        limit=limit,
+        recent_start=recent_start,
+        recent_min_matches=recent_min_matches,
+        recent_min_win_rate=recent_min_win_rate,
+    )
+    return [
+        {
+            **item,
+            "source": source,
+            "window": window_no,
+            "train_start": str(train_start),
+            "train_end": str(cover_start),
+            "cover_start": str(cover_start),
+            "cover_end": str(cover_end),
+        }
+        for item in selected
+    ]
 
 
 def matches_condition(condition: str, row: pd.Series | dict) -> bool:

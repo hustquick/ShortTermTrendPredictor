@@ -72,11 +72,15 @@ def _fit_fast_model(
     labeled: pd.DataFrame,
     train_start: int,
     train_end: int,
+    prediction_timestamp_ms: int,
     feature_cols: list[str],
     label_mode: str,
     args: argparse.Namespace,
 ) -> FastDualModel:
     train = labeled.iloc[train_start:train_end].copy()
+    label_ready_cutoff = int(prediction_timestamp_ms)
+    label_horizon_ms = int(PREDICT_HORIZON_MINUTES) * 60_000
+    train = train[(train["timestamp"] + label_horizon_ms) <= label_ready_cutoff].copy()
     if label_mode == "relative":
         valid_future = train["future_price"].notna()
         train.loc[valid_future, "up_label"] = (train.loc[valid_future, "future_return"] > 0).astype(int)
@@ -196,7 +200,15 @@ def build_fast_stream(args: argparse.Namespace) -> pd.DataFrame:
         if model is None or next_model_update_idx is None or idx >= next_model_update_idx:
             train_start = max(0, idx - args.train_window_minutes)
             fit_started = time.time()
-            model = _fit_fast_model(labeled, train_start, idx, feature_cols, args.label_mode, args)
+            model = _fit_fast_model(
+                labeled,
+                train_start,
+                idx,
+                int(df.iloc[idx]["timestamp"]),
+                feature_cols,
+                args.label_mode,
+                args,
+            )
             next_model_update_idx = idx + args.model_update_minutes
             model_trained_at_time = point_time
             segment_end = min(next_model_update_idx, candidate_indices[-1] + args.step_minutes)
