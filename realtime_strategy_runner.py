@@ -1607,8 +1607,9 @@ def run_realtime_strategies(
     historical_rows = None
     legacy_coverage_gate = LegacyAdaptiveCoverageGate()
     if "adaptive_rule_switch" in names and not legacy_coverage_gate.report_path.exists():
-        raise FileNotFoundError(
-            "legacy coverage report is required for adaptive_rule_switch official signals: "
+        print(
+            "[realtime_strategy] legacy coverage report not found; "
+            "using online active stable coverage only: "
             f"{legacy_coverage_gate.report_path}"
         )
     live_chart_window = LiveStrategyChartWindow(names) if live_chart else None
