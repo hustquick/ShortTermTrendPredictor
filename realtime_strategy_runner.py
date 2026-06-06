@@ -103,6 +103,7 @@ STRATEGY_MAP = {
 LEGACY_GATE_STRATEGIES = {"adaptive_rule_switch", "livefixed", "faststable"}
 CALIBRATED_META_STRATEGIES = {"calibrated_meta_binary", "paper_mlp"}
 ADAPTIVE_DUAL_QUALITY_STRATEGIES = {"adaptive_dual", "catxgb7030"}
+LIVE_COMPARISON_STRATEGIES = {"livefixed", "faststable", "paper_mlp", "catxgb7030"}
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
 LEGACY_ONLINE_BOOTSTRAP_STATE = DATA_DIR / "legacy_online_candidate_stream.bootstrap.json"
@@ -1034,6 +1035,10 @@ def register_prediction_signal(
         reason=reason,
         quality_context=quality_context,
     )
+    if strategy_name in LIVE_COMPARISON_STRATEGIES and quality_ok:
+        learning.notify = True
+        learning.state = "live_comparison"
+        learning.reason = f"learning_bypassed_for_live_comparison;{learning.reason}"
     notify_enabled = RISK_GATE.is_official(
         final_direction=final_direction,
         strategy_is_allowed=is_official_signal_strategy(strategy_name),
