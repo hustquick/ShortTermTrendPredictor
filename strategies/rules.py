@@ -355,6 +355,37 @@ class BaselineDualStrategy:
         return StrategyDecision("no_trade", max(p_up, p_down), "below_threshold")
 
 
+class CalibratedMetaBinaryStrategy:
+    name = "calibrated_meta_binary"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        p_up = float(prediction.get("up_signal_probability", 0.0))
+        p_down = float(prediction.get("down_signal_probability", 0.0))
+        meta_probability = float(prediction.get("meta_probability", prediction.get("confidence", 0.0)))
+        direction = str(prediction.get("predicted_direction", "no_trade"))
+        primary_direction = str(prediction.get("primary_direction", ""))
+        threshold = float(prediction.get("calibrated_meta_binary_threshold", 1.0))
+        gate = str(prediction.get("calibrated_meta_binary_gate", "block"))
+        reason = (
+            "calibrated_meta_binary;"
+            f"calibrated_meta_binary_gate={gate};"
+            f"meta_probability={meta_probability:.4f};"
+            f"threshold={threshold:.4f};"
+            f"up_probability={p_up:.4f};"
+            f"down_probability={p_down:.4f};"
+            f"primary_direction={primary_direction};"
+            f"threshold_win_rate={float(prediction.get('calibrated_meta_binary_threshold_win_rate', 0.0)):.4f};"
+            f"threshold_signals={int(prediction.get('calibrated_meta_binary_threshold_signals', 0))}"
+        )
+        if gate == "pass" and direction in {"up", "down"}:
+            return StrategyDecision(direction, meta_probability, reason)
+        return StrategyDecision("no_trade", meta_probability, reason)
+
+
+class PaperMlpStrategy(CalibratedMetaBinaryStrategy):
+    name = "paper_mlp"
+
+
 class HighConfidenceFilterStrategy:
     name = "high_confidence_filter"
 
@@ -478,6 +509,18 @@ class AdaptiveDualStrategy:
             return rejected
         reason = "adaptive_dual_strict_long_pullback_signal" if ADAPTIVE_STRICT_FILTER_ENABLED else "adaptive_dual_edge_signal"
         return StrategyDecision(direction, confidence, reason)
+
+
+class CatXgb7030Strategy(AdaptiveDualStrategy):
+    name = "catxgb7030"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        decision = super().decide(features, prediction)
+        return StrategyDecision(
+            decision.direction,
+            decision.confidence,
+            f"method=catxgb7030;{decision.reason}",
+        )
 
 
 class RelaxedScenarioStrategy:
@@ -1816,6 +1859,30 @@ class FinStarScenarioStrategy:
                 return rejected
             return StrategyDecision(result.direction, result.confidence, reason)
         return StrategyDecision("no_trade", result.confidence, reason)
+
+
+class LiveFixedStrategy(AdaptiveRuleSwitchStrategy):
+    name = "livefixed"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        decision = super().decide(features, prediction)
+        return StrategyDecision(
+            decision.direction,
+            decision.confidence,
+            f"method=livefixed;{decision.reason}",
+        )
+
+
+class FastStableStrategy(AdaptiveRuleSwitchStrategy):
+    name = "faststable"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        decision = super().decide(features, prediction)
+        return StrategyDecision(
+            decision.direction,
+            decision.confidence,
+            f"method=faststable;{decision.reason}",
+        )
 
 
 def default_strategies():

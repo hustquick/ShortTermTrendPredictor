@@ -6,6 +6,10 @@ from config import ENABLE_WECHAT_NOTIFICATIONS, WECHAT_REQUEST_TIMEOUT, WECHAT_W
 
 
 STRATEGY_DISPLAY_NAMES = {
+    "livefixed": "LIVEFIXED",
+    "faststable": "FASTSTABLE",
+    "paper_mlp": "PAPER_MLP",
+    "catxgb7030": "CATXGB7030",
     "short_momentum": "⚡ 策略一：short_momentum 做空动量策略",
     "relaxed_scenario": "🧭 策略二：relaxed_scenario 放宽场景策略",
     "historical_match": "🔍 historical_match 历史相似样本策略",

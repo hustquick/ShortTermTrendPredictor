@@ -6,12 +6,17 @@ from realtime_strategy_runner import run_realtime_strategies
 
 
 DEFAULT_STRATEGIES = (
-    "historical_match_short"
+    "livefixed,faststable,paper_mlp,catxgb7030"
 )
 
 OBSERVATION_STRATEGIES = (
     "short_momentum,"
+    "livefixed,"
+    "faststable,"
+    "paper_mlp,"
+    "catxgb7030,"
     "adaptive_rule_switch,"
+    "calibrated_meta_binary,"
     "adaptive_dual,"
     "relaxed_scenario,"
     "historical_match,"
@@ -57,6 +62,11 @@ def main():
         action="store_true",
         help="Open a live matplotlib rolling 30-minute strategy chart window.",
     )
+    parser.add_argument(
+        "--reset-signal-stats",
+        action="store_true",
+        help="Backup and clear historical realtime signal/stat files before starting.",
+    )
     args = parser.parse_args()
     strategy_names = OBSERVATION_STRATEGIES if args.observe_all else args.strategies
 
@@ -66,6 +76,7 @@ def main():
         once=args.once,
         update_cache=not args.no_update_cache,
         live_chart=args.live_chart,
+        reset_signal_stats=args.reset_signal_stats,
     )
 
 

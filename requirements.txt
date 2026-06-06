@@ -7,3 +7,6 @@ lightgbm>=4.0.0
 xgboost>=2.0.0
 catboost>=1.2.0
 matplotlib>=3.8.0
+tensorflow>=2.15.0
+keras-tuner>=1.4.0
+tensorboard>=2.15.0

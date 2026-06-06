@@ -80,6 +80,7 @@ def run_realtime_strategies(
     once: bool = False,
     no_update_cache: bool = False,
     live_chart: bool = False,
+    reset_signal_stats: bool = False,
 ):
     """
     启动多策略实时预测。默认只运行当前正式高胜率策略。
@@ -94,6 +95,7 @@ def run_realtime_strategies(
         once=once,
         update_cache=not no_update_cache,
         live_chart=live_chart,
+        reset_signal_stats=reset_signal_stats,
     )
 
 
@@ -392,6 +394,12 @@ def main():
         help="realtime_strategies 模式下打开 matplotlib 实时滚动图表窗口。",
     )
 
+    parser.add_argument(
+        "--reset-signal-stats",
+        action="store_true",
+        help="realtime_strategies 模式启动前备份并清空历史预测/验证统计。",
+    )
+
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -408,6 +416,7 @@ def main():
             once=args.once,
             no_update_cache=args.no_update_cache,
             live_chart=args.live_chart,
+            reset_signal_stats=args.reset_signal_stats,
         )
 
     elif args.mode == "training_backtest":

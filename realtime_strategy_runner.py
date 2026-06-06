@@ -42,6 +42,7 @@ from config import (
     REALTIME_INTERVAL_SECONDS,
 )
 from core.alpha_model import AlphaModelManager
+from core.calibrated_meta_binary import CalibratedMetaBinaryModelManager
 from core.data_feed import RealtimeDataFeed
 from core.fast_mtf_model import train_fast_mtf_extra_trees_model
 from core.feature_pipeline import FeaturePipeline
@@ -62,12 +63,17 @@ from strategy_learning import build_learning_state, feature_signature, learning_
 from strategies.rules import (
     AdaptiveRuleSwitchStrategy,
     AdaptiveDualStrategy,
+    CalibratedMetaBinaryStrategy,
+    CatXgb7030Strategy,
     FinStarScenarioStrategy,
+    FastStableStrategy,
     HistoricalMatchLongStrategy,
     HistoricalMatchShortStrategy,
     HistoricalMatchStrategy,
     KronosConfirmStrategy,
     KronosLeadStrategy,
+    LiveFixedStrategy,
+    PaperMlpStrategy,
     RelaxedScenarioStrategy,
     ShortMomentumStrategy,
 )
@@ -79,7 +85,12 @@ from trainer import train_validation_model
 STRATEGY_MAP = {
     "short_momentum": ShortMomentumStrategy,
     "adaptive_rule_switch": AdaptiveRuleSwitchStrategy,
+    "livefixed": LiveFixedStrategy,
+    "faststable": FastStableStrategy,
+    "calibrated_meta_binary": CalibratedMetaBinaryStrategy,
+    "paper_mlp": PaperMlpStrategy,
     "adaptive_dual": AdaptiveDualStrategy,
+    "catxgb7030": CatXgb7030Strategy,
     "relaxed_scenario": RelaxedScenarioStrategy,
     "historical_match": HistoricalMatchStrategy,
     "historical_match_long": HistoricalMatchLongStrategy,
@@ -88,6 +99,10 @@ STRATEGY_MAP = {
     "kronos_lead": KronosLeadStrategy,
     "finstar_scenario": FinStarScenarioStrategy,
 }
+
+LEGACY_GATE_STRATEGIES = {"adaptive_rule_switch", "livefixed", "faststable"}
+CALIBRATED_META_STRATEGIES = {"calibrated_meta_binary", "paper_mlp"}
+ADAPTIVE_DUAL_QUALITY_STRATEGIES = {"adaptive_dual", "catxgb7030"}
 
 PENDING_STRATEGY_SIGNALS = DATA_DIR / "pending_strategy_signals.jsonl"
 LEGACY_ONLINE_BOOTSTRAP_STATE = DATA_DIR / "legacy_online_candidate_stream.bootstrap.json"
@@ -235,6 +250,38 @@ def _upsert_csv_row(path: Path, columns: list[str], row: dict, key: str = "predi
 def _strategy_prediction_csv_path(strategy_name: str) -> Path:
     safe_name = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in strategy_name)
     return PER_STRATEGY_PREDICTIONS_DIR / f"{safe_name}.csv"
+
+
+def reset_realtime_signal_stats() -> Path:
+    """Backup and clear live prediction/stat files before a fresh online run."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = DATA_DIR / "realtime_signal_stats_backup" / timestamp
+    paths = [
+        PENDING_STRATEGY_SIGNALS,
+        VALIDATED_STRATEGY_SIGNALS,
+        STRATEGY_PREDICTIONS_CSV,
+        STRATEGY_PREDICTIONS_LATEST_CSV,
+        OFFICIAL_SIGNALS_CSV,
+        PREDICTIONS_CSV,
+        ALL_PREDICTIONS_CSV,
+        DATA_DIR / "signal_funnel.csv",
+        DATA_DIR / "strategy_regime_report.csv",
+        DATA_DIR / "strategy_learning_state.json",
+    ]
+    for path in paths:
+        if path.exists():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            path.replace(backup_dir / path.name)
+    if PER_STRATEGY_PREDICTIONS_DIR.exists():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = backup_dir / PER_STRATEGY_PREDICTIONS_DIR.name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for path in PER_STRATEGY_PREDICTIONS_DIR.glob("*.csv"):
+            path.replace(target_dir / path.name)
+    _save_latest_prediction_rows({})
+    save_pending_signals([])
+    print(f"[realtime_strategy] reset signal stats; backup_dir={backup_dir}")
+    return backup_dir
 
 
 def _load_latest_prediction_rows() -> dict[str, dict]:
@@ -388,7 +435,7 @@ def passes_production_quality_gate(
     reason: str,
     quality_context: dict | None = None,
 ) -> tuple[bool, str]:
-    if strategy_name == "adaptive_dual":
+    if strategy_name in ADAPTIVE_DUAL_QUALITY_STRATEGIES:
         edge = abs(float(prediction.get("direction_edge", 0.0)))
         if confidence < ADAPTIVE_NOTIFY_MIN_CONFIDENCE:
             return False, f"production_blocked;adaptive_confidence_below_{ADAPTIVE_NOTIFY_MIN_CONFIDENCE:.2f}"
@@ -400,10 +447,15 @@ def passes_production_quality_gate(
                 return False, "production_blocked;adaptive_missing_external_confirmation"
         return True, "production_quality_passed"
 
-    if strategy_name == "adaptive_rule_switch":
+    if strategy_name in LEGACY_GATE_STRATEGIES:
         if _extract_reason_value(reason, "legacy_coverage_gate") == "pass":
             return True, "production_quality_passed;legacy_coverage_gate"
-        return False, "production_blocked;adaptive_rule_switch_requires_rolling_coverage"
+        return False, "production_blocked;legacy_gate_requires_rolling_coverage"
+
+    if strategy_name in CALIBRATED_META_STRATEGIES:
+        if _extract_reason_value(reason, "calibrated_meta_binary_gate") == "pass":
+            return True, "production_quality_passed;calibrated_meta_binary_gate"
+        return False, "production_blocked;calibrated_meta_binary_requires_meta_gate"
 
     if strategy_name in {"kronos_confirm", "kronos_lead"}:
         if raw_direction == "down" and not KRONOS_NOTIFY_ALLOW_DOWN:
@@ -800,7 +852,7 @@ def validate_due_signals(df, now_ms: int):
                 is_correct,
             )
 
-        if row["strategy"] == "adaptive_rule_switch":
+        if row["strategy"] in LEGACY_GATE_STRATEGIES:
             LEGACY_CANDIDATE_STREAM.append_validated(
                 row.get("legacy_candidate_stream_row"),
                 actual_direction,
@@ -960,14 +1012,14 @@ def register_prediction_signal(
         features,
     )
     if (
-        strategy_name == "adaptive_rule_switch"
+        strategy_name in LEGACY_GATE_STRATEGIES
         and _extract_reason_value(decision.reason, "adaptive_mode") == "active"
     ):
         learning.notify = True
         learning.state = "delegated_to_rule_switch"
         learning.reason = f"learning_delegated_to_adaptive_rule_switch;{learning.reason}"
     if (
-        strategy_name == "adaptive_rule_switch"
+        strategy_name in LEGACY_GATE_STRATEGIES
         and _extract_reason_value(decision.reason, "legacy_coverage_gate") == "pass"
     ):
         learning.notify = True
@@ -1023,7 +1075,7 @@ def register_prediction_signal(
                 signal_time=signal_time,
                 model_trained_at=LEGACY_LIVE_MODEL_TRAINED_AT,
             )
-            if strategy_name == "adaptive_rule_switch"
+            if strategy_name in LEGACY_GATE_STRATEGIES
             else None
         ),
         **feature_snapshot,
@@ -1592,16 +1644,23 @@ def run_realtime_strategies(
     once: bool = False,
     update_cache: bool = True,
     live_chart: bool = False,
+    reset_signal_stats: bool = False,
 ):
     names = parse_strategy_names(strategy_names)
+    if reset_signal_stats:
+        reset_realtime_signal_stats()
     strategies = [STRATEGY_MAP[name]() for name in names]
     use_kronos = any(name in {"kronos_confirm", "kronos_lead"} for name in names)
+    needs_legacy_gate = any(name in LEGACY_GATE_STRATEGIES for name in names)
     kronos_adapter = KronosAdapter() if use_kronos else None
     data_feed = RealtimeDataFeed(minutes=train_minutes, update_cache=update_cache)
     feature_pipeline = FeaturePipeline()
     # Match the legacy candidate stream used by the long walk-forward coverage backtest.
     alpha_model = AlphaModelManager(retrain_interval_seconds=int(LEGACY_MODEL_UPDATE_MINUTES) * 60)
-    needs_alpha_model = any(name != "adaptive_rule_switch" for name in names)
+    calibrated_meta_model = CalibratedMetaBinaryModelManager(retrain_interval_seconds=30 * 60)
+    needs_calibrated_meta_model = any(name in CALIBRATED_META_STRATEGIES for name in names)
+    no_alpha_model_strategies = LEGACY_GATE_STRATEGIES | CALIBRATED_META_STRATEGIES
+    needs_alpha_model = any(name not in no_alpha_model_strategies for name in names)
 
     print("[realtime_strategy] start")
     print(f"[realtime_strategy] strategies={','.join(names)}")
@@ -1618,9 +1677,12 @@ def run_realtime_strategies(
     if alpha_model.load():
         alpha_model.last_train_time = None
         print("[realtime_strategy] loaded saved model; startup retrain required for legacy coverage parity")
+    if needs_calibrated_meta_model and calibrated_meta_model.load():
+        calibrated_meta_model.last_train_time = None
+        print("[realtime_strategy] loaded calibrated_meta_binary model; startup retrain required")
     historical_rows = None
     legacy_coverage_gate = LegacyAdaptiveCoverageGate()
-    if "adaptive_rule_switch" in names and not legacy_coverage_gate.report_path.exists():
+    if needs_legacy_gate and not legacy_coverage_gate.report_path.exists():
         print(
             "[realtime_strategy] legacy coverage report not found; "
             "using online active stable coverage only: "
@@ -1647,7 +1709,7 @@ def run_realtime_strategies(
                 continue
 
             now_ms = int(df.iloc[-1]["timestamp"])
-            if "adaptive_rule_switch" in names:
+            if needs_legacy_gate:
                 _bootstrap_legacy_online_candidate_stream(now_ms, update_cache=update_cache)
             validate_due_signals(df, now_ms)
             if live_chart_window is not None:
@@ -1678,6 +1740,28 @@ def run_realtime_strategies(
                 time.sleep(REALTIME_INTERVAL_SECONDS)
                 continue
 
+            if needs_calibrated_meta_model:
+                if calibrated_meta_model.model is None or calibrated_meta_model.last_train_time is None:
+                    print("[realtime_strategy] training calibrated_meta_binary model")
+                    calibrated_meta_model.ensure_trained(feature_df, anchor_timestamp=now_ms)
+                    print(
+                        "[realtime_strategy] calibrated_meta_binary model updated: "
+                        f"threshold={calibrated_meta_model.model.threshold:.4f}, "
+                        f"validation_wr={calibrated_meta_model.model.threshold_win_rate:.4f}, "
+                        f"validation_signals={calibrated_meta_model.model.threshold_signals}"
+                    )
+                elif (
+                    datetime.now() - calibrated_meta_model.last_train_time
+                ).total_seconds() >= calibrated_meta_model.retrain_interval_seconds:
+                    print("[realtime_strategy] training calibrated_meta_binary model")
+                    calibrated_meta_model.ensure_trained(feature_df, anchor_timestamp=now_ms)
+                    print(
+                        "[realtime_strategy] calibrated_meta_binary model updated: "
+                        f"threshold={calibrated_meta_model.model.threshold:.4f}, "
+                        f"validation_wr={calibrated_meta_model.model.threshold_win_rate:.4f}, "
+                        f"validation_signals={calibrated_meta_model.model.threshold_signals}"
+                    )
+
             if historical_rows is None and any(hasattr(s, "update_history") for s in strategies):
                 historical_rows = _refresh_historical_match_rows(df, feature_df, alpha_model.model)
                 _update_historical_strategy_context(strategies, historical_rows)
@@ -1704,7 +1788,7 @@ def run_realtime_strategies(
                     latest_features = latest[alpha_model.feature_cols]
                     prediction = alpha_model.predict_one(latest_features)
                 legacy_prediction = None
-                if "adaptive_rule_switch" in names:
+                if needs_legacy_gate:
                     if LEGACY_LIVE_MODEL is None:
                         raise RuntimeError("legacy live model is not prepared")
                     legacy_latest_features = latest[LEGACY_LIVE_MODEL.feature_cols]
@@ -1719,8 +1803,11 @@ def run_realtime_strategies(
                         )
                         legacy_latest_features = legacy_latest_features.fillna(0.0)
                     legacy_prediction = LEGACY_LIVE_MODEL.predict_one(legacy_latest_features)
+                calibrated_meta_prediction = None
+                if needs_calibrated_meta_model:
+                    calibrated_meta_prediction = calibrated_meta_model.predict_one(latest)
                 if prediction is None:
-                    prediction = legacy_prediction
+                    prediction = calibrated_meta_prediction or legacy_prediction
 
                 current_price = float(close_by_timestamp.loc[signal_timestamp])
                 signal_time = ms_to_beijing_time(signal_timestamp)
@@ -1739,6 +1826,17 @@ def run_realtime_strategies(
                         f"up_model={legacy_prediction.get('up_signal_probability'):.4f}, "
                         f"down_model={legacy_prediction.get('down_signal_probability'):.4f}, "
                         f"edge_up_minus_down={legacy_prediction.get('direction_edge'):.4f}"
+                    )
+                if calibrated_meta_prediction is not None:
+                    print(
+                        "[realtime_strategy] calibrated_meta_binary output: "
+                        f"time={signal_time}, trained_at={calibrated_meta_model.model.trained_at}, "
+                        f"direction={calibrated_meta_prediction.get('predicted_direction')}, "
+                        f"meta={calibrated_meta_prediction.get('meta_probability'):.4f}, "
+                        f"threshold={calibrated_meta_prediction.get('calibrated_meta_binary_threshold'):.4f}, "
+                        f"up_model={calibrated_meta_prediction.get('up_signal_probability'):.4f}, "
+                        f"down_model={calibrated_meta_prediction.get('down_signal_probability'):.4f}, "
+                        f"edge_up_minus_down={calibrated_meta_prediction.get('direction_edge'):.4f}"
                     )
 
                 if kronos_adapter is not None:
@@ -1762,12 +1860,14 @@ def run_realtime_strategies(
                 for strategy in strategies:
                     strategy_prediction = (
                         legacy_prediction
-                        if strategy.name == "adaptive_rule_switch" and legacy_prediction is not None
+                        if strategy.name in LEGACY_GATE_STRATEGIES and legacy_prediction is not None
+                        else calibrated_meta_prediction
+                        if strategy.name in CALIBRATED_META_STRATEGIES and calibrated_meta_prediction is not None
                         else prediction
                     )
                     prediction_by_strategy[strategy.name] = strategy_prediction
                     decision = strategy.decide(feature_row, strategy_prediction)
-                    if strategy.name == "adaptive_rule_switch":
+                    if strategy.name in LEGACY_GATE_STRATEGIES:
                         legacy_decision = legacy_coverage_gate.decide(feature_row, strategy_prediction)
                         if legacy_decision.accepted:
                             legacy_coverage_context = legacy_decision
@@ -1796,7 +1896,7 @@ def run_realtime_strategies(
                         (
                             strategy_name,
                             decision
-                            if strategy_name == "adaptive_rule_switch"
+                            if strategy_name in LEGACY_GATE_STRATEGIES
                             else StrategyDecision(
                                 decision.direction,
                                 decision.confidence,

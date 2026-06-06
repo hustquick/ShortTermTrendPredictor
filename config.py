@@ -153,7 +153,12 @@ LEGACY_MODEL_UPDATE_MINUTES = int(os.getenv("LEGACY_MODEL_UPDATE_MINUTES", "1008
 
 # 企业微信通知白名单。列入的策略产生 up/down 信号时会推送预测和验证通知。
 OFFICIAL_SIGNAL_STRATEGY_ALLOWLIST = (
+    "livefixed",
+    "faststable",
+    "paper_mlp",
+    "catxgb7030",
     "adaptive_rule_switch",
+    "calibrated_meta_binary",
     "adaptive_dual",
     "historical_match",
     "historical_match_short",
