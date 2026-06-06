@@ -1713,6 +1713,7 @@ def run_realtime_strategies(
                             "[realtime_strategy] legacy live features contain NaN; "
                             f"time={ms_to_beijing_time(int(feature_row['timestamp']))}"
                         )
+                        last_processed_signal_timestamp = signal_timestamp
                         continue
                     legacy_prediction = LEGACY_LIVE_MODEL.predict_one(legacy_latest_features)
                 if prediction is None:
