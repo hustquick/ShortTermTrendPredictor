@@ -1709,12 +1709,15 @@ def run_realtime_strategies(
                         raise RuntimeError("legacy live model is not prepared")
                     legacy_latest_features = latest[LEGACY_LIVE_MODEL.feature_cols]
                     if legacy_latest_features.isna().any(axis=None):
+                        nan_columns = legacy_latest_features.columns[
+                            legacy_latest_features.isna().any(axis=0)
+                        ].tolist()
                         print(
-                            "[realtime_strategy] legacy live features contain NaN; "
-                            f"time={ms_to_beijing_time(int(feature_row['timestamp']))}"
+                            "[realtime_strategy] legacy live features contain NaN; fill with 0; "
+                            f"time={ms_to_beijing_time(int(feature_row['timestamp']))}, "
+                            f"columns={','.join(nan_columns[:10])}"
                         )
-                        last_processed_signal_timestamp = signal_timestamp
-                        continue
+                        legacy_latest_features = legacy_latest_features.fillna(0.0)
                     legacy_prediction = LEGACY_LIVE_MODEL.predict_one(legacy_latest_features)
                 if prediction is None:
                     prediction = legacy_prediction
