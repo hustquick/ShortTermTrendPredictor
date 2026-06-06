@@ -86,6 +86,9 @@ LEGACY_CANDIDATE_RULE_OUTCOME_COLUMNS = [
     "actual_direction",
     "correct",
 ]
+LEGACY_ACTIVE_RULE_HISTORY = 15
+LEGACY_ACTIVE_RULE_MIN_SAMPLES = 5
+LEGACY_ACTIVE_RULE_MIN_WIN_RATE = 0.95
 
 
 def legacy_candidates(features, prediction: dict) -> list[dict]:
@@ -387,7 +390,14 @@ def _active_candidate(candidates: list[dict], records_by_rule: dict[str, deque[b
     for rule in candidates:
         samples, wins, win_rate = _stats(records_by_rule[rule["name"]])
         scored.append({**rule, "prior_rule_samples": samples, "prior_rule_wins": wins, "prior_rule_win": win_rate})
-    active = [item for item in scored if item["prior_rule_samples"] >= 5 and item["prior_rule_win"] >= 0.80]
+    active = [
+        item
+        for item in scored
+        if (
+            item["prior_rule_samples"] >= LEGACY_ACTIVE_RULE_MIN_SAMPLES
+            and item["prior_rule_win"] >= LEGACY_ACTIVE_RULE_MIN_WIN_RATE
+        )
+    ]
     if not active:
         return None
     return sorted(
@@ -409,7 +419,7 @@ class LegacyCandidateStreamGenerator:
         self.rule_outcome_path = rule_outcome_path or LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV
 
     def _records_by_rule(self) -> dict[str, deque[bool]]:
-        records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=10))
+        records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=LEGACY_ACTIVE_RULE_HISTORY))
         frames = []
         for path in (self.history_path, self.stream_path):
             if path.exists():
