@@ -42,6 +42,18 @@ ACTIVE_STABLE_RULE_NAME = "active_stable_rule_generator"
 ACTIVE_STABLE_RULE_CONFIDENCE = float(os.getenv("ACTIVE_STABLE_RULE_CONFIDENCE", "0.82"))
 ACTIVE_STABLE_REDISCOVER_INTERVAL_MS = int(os.getenv("ACTIVE_STABLE_REDISCOVER_INTERVAL_MINUTES", "15")) * 60_000
 ACTIVE_STABLE_COVER_MS = int(os.getenv("ACTIVE_STABLE_COVER_MINUTES", "60")) * 60_000
+ACTIVE_STABLE_FAMILIES = tuple(
+    item.strip()
+    for item in os.getenv("ACTIVE_STABLE_FAMILIES", "orderflow").split(",")
+    if item.strip()
+)
+ACTIVE_STABLE_MIN_SELECT_SAMPLES = int(os.getenv("ACTIVE_STABLE_MIN_SELECT_SAMPLES", "20"))
+ACTIVE_STABLE_MIN_SELECT_WR = float(os.getenv("ACTIVE_STABLE_MIN_SELECT_WR", "0.62"))
+ACTIVE_STABLE_MIN_SELECT_WILSON = float(os.getenv("ACTIVE_STABLE_MIN_SELECT_WILSON", "0.25"))
+ACTIVE_STABLE_RECENT_REVIEW_MINUTES = int(os.getenv("ACTIVE_STABLE_RECENT_REVIEW_MINUTES", "180"))
+ACTIVE_STABLE_RECENT_MIN_SAMPLES = int(os.getenv("ACTIVE_STABLE_RECENT_MIN_SAMPLES", "3"))
+ACTIVE_STABLE_RECENT_MIN_WR = float(os.getenv("ACTIVE_STABLE_RECENT_MIN_WR", "0.50"))
+OFFICIAL_SIGNALS_CSV = DATA_DIR / "official_signals.csv"
 FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -393,6 +405,9 @@ class LegacyAdaptiveCoverageGate:
         if matched_item is None:
             return None
         condition = str(matched_item.get("condition", ACTIVE_ORDERFLOW_RULE_CONDITION))
+        recent_ok, recent_reason = self._active_condition_recent_quality(condition, now_ms)
+        if not recent_ok:
+            return None
         reason = (
             "legacy_coverage_gate=pass;"
             f"legacy_rule={ACTIVE_STABLE_RULE_NAME};"
@@ -404,7 +419,8 @@ class LegacyAdaptiveCoverageGate:
             f"legacy_train_win_rate={matched_item.get('train_win_rate', '')};"
             f"legacy_train_wilson_lower={matched_item.get('train_wilson_lower', '')};"
             f"legacy_select_win_rate={matched_item.get('select_win_rate', '')};"
-            f"legacy_select_samples={matched_item.get('select_samples', '')}"
+            f"legacy_select_samples={matched_item.get('select_samples', '')};"
+            f"legacy_recent_quality={recent_reason}"
         )
         return LegacyCoverageDecision(
             True,
@@ -414,6 +430,45 @@ class LegacyAdaptiveCoverageGate:
             condition,
             reason,
         )
+
+    @staticmethod
+    def _extract_reason_value(reason: str, key: str) -> str:
+        prefix = f"{key}="
+        for part in str(reason).split(";"):
+            if part.startswith(prefix):
+                return part[len(prefix):]
+        return ""
+
+    def _active_condition_recent_quality(self, condition: str, now_ms: int) -> tuple[bool, str]:
+        if not OFFICIAL_SIGNALS_CSV.exists():
+            return True, "no_official_history"
+        try:
+            df = pd.read_csv(OFFICIAL_SIGNALS_CSV, usecols=["timestamp", "reason", "validation_status", "is_correct"])
+        except Exception:
+            return True, "official_history_unreadable"
+        if df.empty:
+            return True, "official_history_empty"
+        df = df[df["validation_status"].astype(str).eq("validated")].copy()
+        if df.empty:
+            return True, "no_validated_official_history"
+        df["timestamp_dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df[df["timestamp_dt"].notna()].copy()
+        now_dt = self._now_dt(now_ms)
+        review_start = now_dt - pd.Timedelta(minutes=ACTIVE_STABLE_RECENT_REVIEW_MINUTES)
+        df = df[df["timestamp_dt"] >= review_start].copy()
+        if df.empty:
+            return True, "no_recent_official_history"
+        df["legacy_condition"] = df["reason"].map(lambda item: self._extract_reason_value(item, "legacy_condition"))
+        same = df[df["legacy_condition"].eq(condition)].copy()
+        samples = int(len(same))
+        if samples < ACTIVE_STABLE_RECENT_MIN_SAMPLES:
+            return True, f"recent_samples={samples}"
+        correct = same["is_correct"].astype(str).str.lower().eq("true")
+        wins = int(correct.sum())
+        win_rate = wins / samples
+        if win_rate < ACTIVE_STABLE_RECENT_MIN_WR:
+            return False, f"recent_blocked_samples={samples},wins={wins},wr={win_rate:.4f}"
+        return True, f"recent_samples={samples},wins={wins},wr={win_rate:.4f}"
 
     def _direct_feature_candidate_rows(self) -> pd.DataFrame:
         required_minutes = 3 * 24 * 60 + 6 * 60 + 360 + PREDICT_HORIZON_MINUTES + 30
@@ -468,7 +523,7 @@ class LegacyAdaptiveCoverageGate:
             return
         anchor = candidates["timestamp_dt"].max()
         selected: list[dict] = []
-        for family in ("orderflow", "mtf", "reversal", "trend"):
+        for family in ACTIVE_STABLE_FAMILIES:
             for train_days in (1, 2, 3):
                 for select_hours in (3, 6, 12):
                     select_start = anchor - pd.Timedelta(hours=select_hours)
@@ -488,9 +543,9 @@ class LegacyAdaptiveCoverageGate:
                             train_subwindows=2,
                             min_subwindow_samples=4,
                             min_subwindow_wr=0.54,
-                            min_select_samples=4,
-                            min_select_wr=0.62,
-                            min_select_wilson=0.15,
+                            min_select_samples=ACTIVE_STABLE_MIN_SELECT_SAMPLES,
+                            min_select_wr=ACTIVE_STABLE_MIN_SELECT_WR,
+                            min_select_wilson=ACTIVE_STABLE_MIN_SELECT_WILSON,
                             beam_size=80,
                             candidate_limit=80,
                             selected_limit=3,
