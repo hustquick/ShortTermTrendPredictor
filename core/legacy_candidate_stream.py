@@ -17,6 +17,9 @@ LEGACY_CANDIDATE_STREAM_CSV = (
 )
 LEGACY_ONLINE_CANDIDATE_STREAM_CSV = DATA_DIR / "legacy_online_candidate_stream.csv"
 LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV = DATA_DIR / "legacy_online_candidate_rule_outcomes.csv"
+LEGACY_CANDIDATE_RULE_OUTCOMES_CSV = (
+    DATA_DIR / "legacy_recovered_selected_stream_365d_plus_online_causal_delay10_expanded_rule_outcomes.csv"
+)
 LEGACY_CANDIDATE_FEATURE_COLUMNS = (
     "ret_5",
     "ret_10",
@@ -413,10 +416,12 @@ class LegacyCandidateStreamGenerator:
         stream_path: Path | None = None,
         history_path: Path | None = None,
         rule_outcome_path: Path | None = None,
+        history_rule_outcome_path: Path | None = None,
     ):
         self.stream_path = stream_path or LEGACY_ONLINE_CANDIDATE_STREAM_CSV
         self.history_path = history_path or LEGACY_CANDIDATE_STREAM_CSV
         self.rule_outcome_path = rule_outcome_path or LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV
+        self.history_rule_outcome_path = history_rule_outcome_path or LEGACY_CANDIDATE_RULE_OUTCOMES_CSV
 
     def _records_by_rule(self) -> dict[str, deque[bool]]:
         records_by_rule: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=LEGACY_ACTIVE_RULE_HISTORY))
@@ -427,9 +432,11 @@ class LegacyCandidateStreamGenerator:
                     frames.append(pd.read_csv(path, usecols=["timestamp", "rule", "direction", "actual_direction"]))
                 except Exception:
                     continue
-        if self.rule_outcome_path.exists():
+        for path in (self.history_rule_outcome_path, self.rule_outcome_path):
+            if not path.exists():
+                continue
             try:
-                frames.append(pd.read_csv(self.rule_outcome_path))
+                frames.append(pd.read_csv(path))
             except Exception:
                 pass
         if not frames:

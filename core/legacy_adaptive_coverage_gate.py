@@ -9,6 +9,7 @@ from config import PREDICT_HORIZON_MINUTES
 from core.feature_pipeline import FeaturePipeline
 from core.legacy_candidate_stream import (
     LEGACY_CANDIDATE_STREAM_CSV,
+    LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV,
     LEGACY_ONLINE_CANDIDATE_STREAM_CSV,
     LegacyCandidateStreamGenerator,
     legacy_candidates,
@@ -113,7 +114,11 @@ class LegacyAdaptiveCoverageGate:
         report_path: Path | None = None,
         validated_path: Path | None = None,
         candidate_stream_path: Path | None = None,
+        candidate_rule_outcome_path: Path | None = None,
+        online_stream_path: Path | None = None,
+        online_rule_outcome_path: Path | None = None,
         enabled: bool = True,
+        strict_online_only: bool = False,
         online_rediscovery_enabled: bool = True,
         rediscover_interval_minutes: int = 10,
         train_days: int = 3,
@@ -129,7 +134,11 @@ class LegacyAdaptiveCoverageGate:
         self.report_path = report_path or DEFAULT_COVERAGE_REPORT
         self.validated_path = validated_path or DEFAULT_VALIDATED_SIGNALS
         self.candidate_stream_path = candidate_stream_path or DEFAULT_CANDIDATE_STREAM
+        self.candidate_rule_outcome_path = candidate_rule_outcome_path
+        self.online_stream_path = online_stream_path or LEGACY_ONLINE_CANDIDATE_STREAM_CSV
+        self.online_rule_outcome_path = online_rule_outcome_path or LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV
         self.enabled = enabled
+        self.strict_online_only = strict_online_only
         self.online_rediscovery_enabled = online_rediscovery_enabled
         self.rediscover_interval_ms = int(rediscover_interval_minutes) * 60_000
         self.train_days = train_days
@@ -157,7 +166,12 @@ class LegacyAdaptiveCoverageGate:
         self._online_conditions: list[dict] = []
         self._active_window_key: tuple[int, str] | None = None
         self._last_rediscover_ms = 0
-        self._candidate_stream = LegacyCandidateStreamGenerator()
+        self._candidate_stream = LegacyCandidateStreamGenerator(
+            stream_path=self.online_stream_path,
+            history_path=self.candidate_stream_path,
+            rule_outcome_path=self.online_rule_outcome_path,
+            history_rule_outcome_path=self.candidate_rule_outcome_path,
+        )
         self._active_stable_conditions: list[dict] = []
         self._last_stable_rediscover_ms = 0
 
@@ -166,6 +180,9 @@ class LegacyAdaptiveCoverageGate:
             return
         self._loaded = True
         if not self.enabled:
+            return
+        if self.strict_online_only:
+            self._offline_conditions = []
             return
         if not self.report_path.exists():
             return
@@ -229,10 +246,12 @@ class LegacyAdaptiveCoverageGate:
         return ""
 
     def _candidate_training_rows(self) -> pd.DataFrame:
-        stream_paths = [self.candidate_stream_path, LEGACY_ONLINE_CANDIDATE_STREAM_CSV]
+        stream_paths = [self.candidate_stream_path, self.online_stream_path]
         df = load_candidate_rows(stream_paths)
         if not df.empty:
             return df
+        if self.strict_online_only:
+            return pd.DataFrame()
         if not self.validated_path.exists():
             return pd.DataFrame()
         try:
@@ -278,15 +297,20 @@ class LegacyAdaptiveCoverageGate:
         if df.empty:
             return
         now_dt = self._now_dt(now_ms)
+        kwargs = {}
+        if not self.strict_online_only:
+            kwargs = {
+                "recent_lookback_days": 1,
+                "recent_min_matches": 3,
+                "recent_min_win_rate": self.min_win_rate,
+            }
         items = build_window_items(
             df,
             now_dt,
             self._coverage_config,
-            source="online_rolling_coverage",
+            source="strict_online_rolling_coverage" if self.strict_online_only else "online_rolling_coverage",
             limit=5,
-            recent_lookback_days=1,
-            recent_min_matches=3,
-            recent_min_win_rate=self.min_win_rate,
+            **kwargs,
         )
         if not items:
             self._online_conditions = []
@@ -351,6 +375,8 @@ class LegacyAdaptiveCoverageGate:
     def _active_conditions(self, now_ms: int) -> list[dict]:
         if self._online_conditions and self._active_condition_is_current(self._online_conditions[0], now_ms):
             return self._online_conditions
+        if self.strict_online_only:
+            return []
         if self.online_rediscovery_enabled and self._active_window_key is not None and not self._online_conditions:
             return []
         return [item for item in self._offline_conditions if self._active_condition_is_current(item, now_ms)]
@@ -586,9 +612,10 @@ class LegacyAdaptiveCoverageGate:
     def decide(self, features, prediction: dict) -> LegacyCoverageDecision:
         self._load()
         now_ms = int(feature_value(features, "timestamp", 0.0))
-        active_stable = self._active_stable_decision(features, now_ms)
-        if active_stable is not None:
-            return active_stable
+        if not self.strict_online_only:
+            active_stable = self._active_stable_decision(features, now_ms)
+            if active_stable is not None:
+                return active_stable
         self._maybe_rediscover(now_ms)
         if not self.enabled:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_gate_disabled")

@@ -1873,6 +1873,18 @@ class LiveFixedStrategy(AdaptiveRuleSwitchStrategy):
         )
 
 
+class StrictLiveFixedStrategy(AdaptiveRuleSwitchStrategy):
+    name = "strict_livefixed"
+
+    def decide(self, features, prediction: dict) -> StrategyDecision:
+        decision = super().decide(features, prediction)
+        return StrategyDecision(
+            decision.direction,
+            decision.confidence,
+            f"method=strict_livefixed;strict_parity=true;{decision.reason}",
+        )
+
+
 class FastStableStrategy(AdaptiveRuleSwitchStrategy):
     name = "faststable"
 

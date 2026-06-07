@@ -6,6 +6,7 @@ from config import ENABLE_WECHAT_NOTIFICATIONS, WECHAT_REQUEST_TIMEOUT, WECHAT_W
 
 
 STRATEGY_DISPLAY_NAMES = {
+    "strict_livefixed": "STRICT_LIVEFIXED",
     "livefixed": "LIVEFIXED",
     "faststable": "FASTSTABLE",
     "paper_mlp": "PAPER_MLP",
