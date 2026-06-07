@@ -1641,9 +1641,12 @@ def _bootstrap_legacy_online_candidate_stream(
         bootstrapped_target = None
         print(f"[realtime_strategy] reset legacy online stream: {rebuild_reason}")
     online_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_STREAM_CSV)
+    online_rule_outcome_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV)
+    progress_latest_candidates = [ts for ts in (online_latest, online_rule_outcome_latest) if ts is not None]
+    online_progress_latest = max(progress_latest_candidates) if progress_latest_candidates else None
     start_dt = (
-        online_latest + pd.Timedelta(minutes=1)
-        if online_latest is not None
+        online_progress_latest + pd.Timedelta(minutes=1)
+        if online_progress_latest is not None
         else static_meta["last_timestamp"] + pd.Timedelta(minutes=1)
     )
     start_ms = _timestamp_to_ms(start_dt)
@@ -1670,10 +1673,10 @@ def _bootstrap_legacy_online_candidate_stream(
     )
 
     stream_is_current = (
-        online_latest is not None
+        online_progress_latest is not None
         and bootstrapped_target is not None
         and bootstrapped_target >= target_dt - pd.Timedelta(minutes=1)
-        and online_latest >= target_dt - pd.Timedelta(hours=12)
+        and online_progress_latest >= target_dt - pd.Timedelta(hours=12)
         and LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV.exists()
     )
     if stream_is_current:
@@ -1693,6 +1696,7 @@ def _bootstrap_legacy_online_candidate_stream(
         "[realtime_strategy] bootstrapping legacy online candidate stream: "
         f"start={start_dt}, target={target_dt}, "
         f"static_latest={static_meta['last_timestamp']}, online_latest={online_latest}, "
+        f"online_rule_outcome_latest={online_rule_outcome_latest}, "
         f"base_anchor={static_meta['last_anchor']}"
     )
     cutoff_dt = start_dt - pd.Timedelta(minutes=PREDICT_HORIZON_MINUTES)
@@ -1720,12 +1724,21 @@ def _bootstrap_legacy_online_candidate_stream(
         append=not rebuild_online and LEGACY_ONLINE_CANDIDATE_STREAM_CSV.exists(),
     )
     bootstrapped_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_STREAM_CSV)
+    bootstrapped_rule_outcome_latest = _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV)
+    bootstrapped_progress_latest_candidates = [
+        ts for ts in (bootstrapped_latest, bootstrapped_rule_outcome_latest) if ts is not None
+    ]
+    bootstrapped_progress_latest = (
+        max(bootstrapped_progress_latest_candidates) if bootstrapped_progress_latest_candidates else None
+    )
     LEGACY_ONLINE_BOOTSTRAP_STATE.write_text(
         json.dumps(
             {
                 "generated_start": str(start_dt),
                 "generated_target": str(target_dt),
                 "stream_latest": str(bootstrapped_latest),
+                "rule_outcome_latest": str(bootstrapped_rule_outcome_latest),
+                "progress_latest": str(bootstrapped_progress_latest),
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "base_anchor": str(static_meta["last_anchor"]),
                 "live_anchor": LEGACY_LIVE_MODEL_TRAINED_AT,
@@ -1741,7 +1754,8 @@ def _bootstrap_legacy_online_candidate_stream(
     )
     print(
         "[realtime_strategy] legacy online candidate stream bootstrapped: "
-        f"latest={bootstrapped_latest}, stream={LEGACY_ONLINE_CANDIDATE_STREAM_CSV}, "
+        f"stream_latest={bootstrapped_latest}, rule_outcome_latest={bootstrapped_rule_outcome_latest}, "
+        f"progress_latest={bootstrapped_progress_latest}, stream={LEGACY_ONLINE_CANDIDATE_STREAM_CSV}, "
         f"rule_outcomes={LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV}"
     )
     LEGACY_ONLINE_BOOTSTRAPPED_THIS_PROCESS = True
