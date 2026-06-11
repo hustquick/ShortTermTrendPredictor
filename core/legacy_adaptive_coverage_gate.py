@@ -65,6 +65,7 @@ STRICT_LIVEFIXED_COVERAGE_PROFILES = os.getenv(
         ]
     ),
 )
+STRICT_LIVEFIXED_CONDITION_LIMIT = int(os.getenv("STRICT_LIVEFIXED_CONDITION_LIMIT", "50"))
 OFFICIAL_SIGNALS_CSV = DATA_DIR / "official_signals.csv"
 FEATURE_COLUMNS = (
     "ret_5",
@@ -381,7 +382,7 @@ class LegacyAdaptiveCoverageGate:
                     now_dt,
                     config,
                     source=f"strict_online_rolling_coverage:{profile_name}",
-                    limit=5,
+                    limit=STRICT_LIVEFIXED_CONDITION_LIMIT,
                 )
                 if items:
                     for item in items:
@@ -716,42 +717,60 @@ class LegacyAdaptiveCoverageGate:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_active_window")
 
         selected, _ = self._candidate_stream.selected_candidate(features, prediction)
-        if selected is None:
+        candidates = []
+        if selected is not None:
+            candidates.append(
+                {
+                    "rule": selected["name"],
+                    "direction": selected["direction"],
+                    "confidence": selected["confidence"],
+                    "selection_source": "legacy_active_candidate",
+                }
+            )
+        elif self.strict_online_only:
+            candidates.extend(
+                {
+                    "rule": item["name"],
+                    "direction": item["direction"],
+                    "confidence": item["confidence"],
+                    "selection_source": "strict_current_candidate_match",
+                }
+                for item in legacy_candidates(features, prediction)
+            )
+            candidates = sorted(candidates, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+        if not candidates:
             return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_selected_candidate")
 
-        candidate = {
-            "rule": selected["name"],
-            "direction": selected["direction"],
-            "confidence": selected["confidence"],
-        }
-        row = self._row_for_condition(features, prediction, candidate)
         for item in conditions:
             condition = item["condition"]
-            if not self._matches(condition, row):
-                continue
-            reason = (
-                "legacy_coverage_gate=pass;"
-                f"legacy_rule={candidate['rule']};"
-                f"legacy_condition={condition};"
-                f"legacy_source={item.get('source', 'offline_rolling_coverage')};"
-                f"legacy_report={self.report_path.name};"
-                f"legacy_window={item.get('window', '')};"
-                f"legacy_cover_start={item.get('cover_start', '')};"
-                f"legacy_cover_end={item.get('cover_end', '')};"
-                f"legacy_train_win_rate={item.get('train_win_rate', '')};"
-                f"legacy_train_wilson_lower={item.get('train_wilson_lower', '')};"
-                f"legacy_cover_win_rate={item.get('cover_win_rate', '')};"
-                f"legacy_strict_profile={item.get('strict_coverage_profile', '')};"
-                f"legacy_strict_train_days={item.get('strict_train_days', '')};"
-                f"legacy_strict_cover_days={item.get('strict_cover_days', '')};"
-                f"legacy_strict_min_signals_per_day={item.get('strict_min_signals_per_day', '')}"
-            )
-            return LegacyCoverageDecision(
-                True,
-                candidate["direction"],
-                float(candidate["confidence"]),
-                candidate["rule"],
-                condition,
-                reason,
-            )
+            for candidate in candidates:
+                row = self._row_for_condition(features, prediction, candidate)
+                if not self._matches(condition, row):
+                    continue
+                reason = (
+                    "legacy_coverage_gate=pass;"
+                    f"legacy_rule={candidate['rule']};"
+                    f"legacy_condition={condition};"
+                    f"legacy_source={item.get('source', 'offline_rolling_coverage')};"
+                    f"legacy_report={self.report_path.name};"
+                    f"legacy_window={item.get('window', '')};"
+                    f"legacy_cover_start={item.get('cover_start', '')};"
+                    f"legacy_cover_end={item.get('cover_end', '')};"
+                    f"legacy_train_win_rate={item.get('train_win_rate', '')};"
+                    f"legacy_train_wilson_lower={item.get('train_wilson_lower', '')};"
+                    f"legacy_cover_win_rate={item.get('cover_win_rate', '')};"
+                    f"legacy_selection_source={candidate.get('selection_source', '')};"
+                    f"legacy_strict_profile={item.get('strict_coverage_profile', '')};"
+                    f"legacy_strict_train_days={item.get('strict_train_days', '')};"
+                    f"legacy_strict_cover_days={item.get('strict_cover_days', '')};"
+                    f"legacy_strict_min_signals_per_day={item.get('strict_min_signals_per_day', '')}"
+                )
+                return LegacyCoverageDecision(
+                    True,
+                    candidate["direction"],
+                    float(candidate["confidence"]),
+                    candidate["rule"],
+                    condition,
+                    reason,
+                )
         return LegacyCoverageDecision(False, "no_trade", 0.0, "", "", "legacy_coverage_no_match")
