@@ -1409,16 +1409,36 @@ def _strict_candidate_streams_are_suitable(now_ms: int | None = None) -> tuple[b
             return False, f"missing_or_empty:{path.name}"
     max_stale_minutes = int(os.getenv("STRICT_LIVEFIXED_BASE_MAX_STALE_MINUTES", "60"))
     if now_ms is not None and max_stale_minutes > 0:
-        latest = _latest_csv_timestamp(STRICT_LEGACY_CANDIDATE_STREAM_CSV)
-        if latest is None:
+        base_latest = _latest_csv_timestamp(STRICT_LEGACY_CANDIDATE_STREAM_CSV)
+        if base_latest is None:
             return False, "candidate_stream_has_no_valid_timestamp"
         target_dt = pd.to_datetime(ms_to_beijing_time(int(now_ms) - PREDICT_HORIZON_MINUTES * 60_000))
         min_latest = target_dt - pd.Timedelta(minutes=max_stale_minutes)
-        if latest < min_latest:
-            return False, (
-                "stale_base_candidate_stream:"
-                f"latest={latest}, required_after={min_latest}, max_stale_minutes={max_stale_minutes}"
+        online_candidates = [
+            ts
+            for ts in (
+                base_latest,
+                _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_STREAM_CSV),
+                _latest_csv_timestamp(LEGACY_ONLINE_CANDIDATE_RULE_OUTCOMES_CSV),
             )
+            if ts is not None
+        ]
+        progress_latest = max(online_candidates) if online_candidates else base_latest
+        if progress_latest >= min_latest:
+            return True, (
+                "base_candidate_stream_present;"
+                f"progress_latest={progress_latest};required_after={min_latest}"
+            )
+        if os.getenv("STRICT_LIVEFIXED_REQUIRE_FRESH_BASE", "0").lower() in {"1", "true", "yes"}:
+            return False, (
+                "stale_strict_candidate_progress:"
+                f"progress_latest={progress_latest}, required_after={min_latest}, "
+                f"max_stale_minutes={max_stale_minutes}"
+            )
+        return True, (
+            "base_candidate_stream_present;online_bootstrap_required;"
+            f"base_latest={base_latest};progress_latest={progress_latest};required_after={min_latest}"
+        )
     return True, "base_candidate_stream_present"
 
 
