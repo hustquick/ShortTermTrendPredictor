@@ -54,6 +54,17 @@ ACTIVE_STABLE_MIN_SELECT_WILSON = float(os.getenv("ACTIVE_STABLE_MIN_SELECT_WILS
 ACTIVE_STABLE_RECENT_REVIEW_MINUTES = int(os.getenv("ACTIVE_STABLE_RECENT_REVIEW_MINUTES", "180"))
 ACTIVE_STABLE_RECENT_MIN_SAMPLES = int(os.getenv("ACTIVE_STABLE_RECENT_MIN_SAMPLES", "3"))
 ACTIVE_STABLE_RECENT_MIN_WR = float(os.getenv("ACTIVE_STABLE_RECENT_MIN_WR", "0.95"))
+STRICT_LIVEFIXED_COVERAGE_PROFILES = os.getenv(
+    "STRICT_LIVEFIXED_COVERAGE_PROFILES",
+    ",".join(
+        [
+            "30:7:10:60:0.75:0.68:3:120",
+            "14:1:5:40:0.75:0.65:3:120",
+            "7:1:3:30:0.75:0.62:3:120",
+            "3:1:2:20:0.75:0.58:2:120",
+        ]
+    ),
+)
 OFFICIAL_SIGNALS_CSV = DATA_DIR / "official_signals.csv"
 FEATURE_COLUMNS = (
     "ret_5",
@@ -96,6 +107,70 @@ FEATURE_COLUMNS = (
     "mtf_5m_taker_buy_ratio",
     "mtf_5m_volume_ratio_5",
 )
+
+
+def _strict_coverage_configs(default_config: RollingCoverageConfig) -> list[tuple[str, RollingCoverageConfig]]:
+    configs: list[tuple[str, RollingCoverageConfig]] = [("strict_standard_30d_7d", default_config)]
+    seen = {
+        (
+            default_config.train_days,
+            default_config.cover_days,
+            default_config.min_signals_per_day,
+            default_config.min_samples,
+            default_config.min_win_rate,
+            default_config.min_wilson_lower,
+            default_config.max_clauses,
+            default_config.beam_size,
+        )
+    }
+    for raw_item in str(STRICT_LIVEFIXED_COVERAGE_PROFILES).split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        parts = item.split(":")
+        if len(parts) != 8:
+            continue
+        try:
+            train_days = int(parts[0])
+            cover_days = int(parts[1])
+            min_signals_per_day = float(parts[2])
+            min_samples = int(parts[3])
+            min_win_rate = float(parts[4])
+            min_wilson_lower = float(parts[5])
+            max_clauses = int(parts[6])
+            beam_size = int(parts[7])
+        except ValueError:
+            continue
+        key = (
+            train_days,
+            cover_days,
+            min_signals_per_day,
+            min_samples,
+            min_win_rate,
+            min_wilson_lower,
+            max_clauses,
+            beam_size,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        configs.append(
+            (
+                f"strict_current_{train_days}d_{cover_days}d_min{min_signals_per_day:g}",
+                RollingCoverageConfig(
+                    train_days=train_days,
+                    cover_days=cover_days,
+                    step_days=cover_days,
+                    max_clauses=max_clauses,
+                    min_samples=min_samples,
+                    min_signals_per_day=min_signals_per_day,
+                    min_win_rate=min_win_rate,
+                    min_wilson_lower=min_wilson_lower,
+                    beam_size=beam_size,
+                ),
+            )
+        )
+    return configs
 
 
 @dataclass
@@ -161,6 +236,7 @@ class LegacyAdaptiveCoverageGate:
             min_wilson_lower=min_wilson_lower,
             beam_size=beam_size,
         )
+        self._strict_coverage_configs = _strict_coverage_configs(self._coverage_config)
         self._loaded = False
         self._offline_conditions: list[dict] = []
         self._online_conditions: list[dict] = []
@@ -297,21 +373,37 @@ class LegacyAdaptiveCoverageGate:
         if df.empty:
             return
         now_dt = self._now_dt(now_ms)
-        kwargs = {}
-        if not self.strict_online_only:
-            kwargs = {
-                "recent_lookback_days": 1,
-                "recent_min_matches": 3,
-                "recent_min_win_rate": self.min_win_rate,
-            }
-        items = build_window_items(
-            df,
-            now_dt,
-            self._coverage_config,
-            source="strict_online_rolling_coverage" if self.strict_online_only else "online_rolling_coverage",
-            limit=5,
-            **kwargs,
-        )
+        items = []
+        if self.strict_online_only:
+            for profile_name, config in self._strict_coverage_configs:
+                items = build_window_items(
+                    df,
+                    now_dt,
+                    config,
+                    source=f"strict_online_rolling_coverage:{profile_name}",
+                    limit=5,
+                )
+                if items:
+                    for item in items:
+                        item["strict_coverage_profile"] = profile_name
+                        item["strict_train_days"] = config.train_days
+                        item["strict_cover_days"] = config.cover_days
+                        item["strict_min_signals_per_day"] = config.min_signals_per_day
+                        item["strict_min_samples"] = config.min_samples
+                        item["strict_min_win_rate"] = config.min_win_rate
+                        item["strict_min_wilson_lower"] = config.min_wilson_lower
+                    break
+        else:
+            items = build_window_items(
+                df,
+                now_dt,
+                self._coverage_config,
+                source="online_rolling_coverage",
+                limit=5,
+                recent_lookback_days=1,
+                recent_min_matches=3,
+                recent_min_win_rate=self.min_win_rate,
+            )
         if not items:
             self._online_conditions = []
             self._active_window_key = (-1, "no_recent_quality_coverage")
@@ -648,7 +740,11 @@ class LegacyAdaptiveCoverageGate:
                 f"legacy_cover_end={item.get('cover_end', '')};"
                 f"legacy_train_win_rate={item.get('train_win_rate', '')};"
                 f"legacy_train_wilson_lower={item.get('train_wilson_lower', '')};"
-                f"legacy_cover_win_rate={item.get('cover_win_rate', '')}"
+                f"legacy_cover_win_rate={item.get('cover_win_rate', '')};"
+                f"legacy_strict_profile={item.get('strict_coverage_profile', '')};"
+                f"legacy_strict_train_days={item.get('strict_train_days', '')};"
+                f"legacy_strict_cover_days={item.get('strict_cover_days', '')};"
+                f"legacy_strict_min_signals_per_day={item.get('strict_min_signals_per_day', '')}"
             )
             return LegacyCoverageDecision(
                 True,
